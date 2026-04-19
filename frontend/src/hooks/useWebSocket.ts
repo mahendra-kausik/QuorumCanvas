@@ -23,7 +23,9 @@ export function useWebSocket({ boardId, userId, onMessage }: UseWebSocketOptions
   const send = useCallback((message: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message));
+      return true;
     }
+    return false;
   }, []);
 
   const connect = useCallback(() => {

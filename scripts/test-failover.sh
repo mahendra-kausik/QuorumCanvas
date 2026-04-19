@@ -15,6 +15,27 @@ pass() { echo -e "${GREEN}✓ $1${NC}"; }
 fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
 info() { echo -e "${YELLOW}→ $1${NC}"; }
 
+LOG_ROOT="logs"
+RUN_ID=$(date +"%Y%m%d-%H%M%S")
+RUN_DIR="${LOG_ROOT}/failover-${RUN_ID}"
+mkdir -p "$RUN_DIR"
+
+write_snapshot() {
+  local name="$1"
+  {
+    echo "=== ${name} @ $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+    for port in 3001 3002 3003 3004; do
+      echo "port ${port}:"
+      curl -s "http://localhost:${port}/status" 2>/dev/null || echo '{"error":"unreachable"}'
+      echo ""
+    done
+  } > "${RUN_DIR}/${name}.json"
+}
+
+capture_compose_logs() {
+  docker compose logs gateway replica1 replica2 replica3 replica4 > "${RUN_DIR}/docker-compose.log" 2>&1 || true
+}
+
 wait_for_leader() {
   local timeout=${1:-10}
   local elapsed=0
@@ -54,6 +75,7 @@ for port in 3001 3002 3003; do
   fi
 done
 pass "All 3 replicas are running"
+write_snapshot "startup"
 
 # Test 1: Leader election
 echo ""
@@ -62,6 +84,7 @@ leader_info=$(wait_for_leader 10) || fail "No leader elected within 10s"
 leader_id=$(echo "$leader_info" | cut -d: -f1)
 leader_port=$(echo "$leader_info" | cut -d: -f2)
 pass "Leader elected: $leader_id (port $leader_port)"
+write_snapshot "leader-elected"
 
 # Show cluster state
 echo ""
@@ -82,6 +105,7 @@ if [ -n "$success" ]; then
 else
   fail "Stroke write failed: $write_result"
 fi
+echo "$write_result" > "${RUN_DIR}/write-1.json"
 
 # Verify replication
 sleep 1
@@ -103,6 +127,7 @@ info "Test 3: Kill leader ($leader_id)"
 leader_service=$(echo "$leader_id" | tr -d '"')
 docker compose stop "$leader_service"
 pass "Stopped $leader_service"
+write_snapshot "leader-stopped"
 
 # Wait for new leader
 info "Waiting for new leader election..."
@@ -115,6 +140,7 @@ if [ "$new_leader_id" != "$leader_id" ]; then
 else
   fail "Same leader re-elected (shouldn't happen — it's stopped)"
 fi
+write_snapshot "new-leader-elected"
 
 # Test 4: Write to new leader
 echo ""
@@ -128,6 +154,7 @@ if [ -n "$success2" ]; then
 else
   fail "Write to new leader failed: $write_result2"
 fi
+echo "$write_result2" > "${RUN_DIR}/write-2.json"
 
 # Test 5: Restart killed replica and verify catch-up
 echo ""
@@ -154,7 +181,11 @@ else
   info "Restarted replica state: $restarted_state"
 fi
 
+write_snapshot "restart-catchup"
+capture_compose_logs
+
 echo ""
 echo "========================================"
 echo -e "  ${GREEN}All failover tests passed!${NC}"
 echo "========================================"
+echo "Logs captured in ${RUN_DIR}"

@@ -162,6 +162,16 @@ describe('RaftNode', () => {
       expect(node.state).toBe(NodeState.Candidate);
     });
 
+    it('resets election timer after split vote', async () => {
+      (rpc.requestVote as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(voteResult(false, 1, 'node-2'))
+        .mockResolvedValueOnce(voteResult(false, 1, 'node-3'));
+
+      await node.runElection();
+      expect(node.state).toBe(NodeState.Candidate);
+      expect(timers.resetElectionTimer).toHaveBeenCalled();
+    });
+
     it('becomes leader with only one peer granting (2 of 3 = majority)', async () => {
       (rpc.requestVote as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(voteResult(true, 1, 'node-2'))
@@ -241,6 +251,26 @@ describe('RaftNode', () => {
         term: 1, leaderId: 'node-2', prevLogIndex: 0, prevLogTerm: 0, entries: [], leaderCommit: 0,
       });
       expect(node.state).toBe(NodeState.Follower);
+    });
+
+    it('rejects conflicting overwrite of committed entries', () => {
+      node.log.append({ index: 1, term: 1, stroke: makeStroke('s1') });
+      node.commitIndex = 1;
+      node.applyCommitted();
+
+      const result = node.handleAppendEntries({
+        term: 2,
+        leaderId: 'node-2',
+        prevLogIndex: 0,
+        prevLogTerm: 0,
+        entries: [{ index: 1, term: 2, stroke: makeStroke('s1-conflict') }],
+        leaderCommit: 1,
+      });
+
+      expect(result.success).toBe(false);
+      expect(node.log.getEntry(1)?.term).toBe(1);
+      expect(node.commitIndex).toBe(1);
+      expect(node.getStrokes('b1').map((s) => s.id)).toEqual(['s1']);
     });
   });
 
@@ -322,6 +352,18 @@ describe('RaftNode', () => {
       expect(result.entries[0].index).toBe(2);
       expect(result.commitIndex).toBe(2);
     });
+
+    it('returns only committed entries', () => {
+      node.log.append({ index: 1, term: 1, stroke: makeStroke('s1') });
+      node.log.append({ index: 2, term: 1, stroke: makeStroke('s2') });
+      node.log.append({ index: 3, term: 1, stroke: makeStroke('s3') });
+      node.commitIndex = 2;
+
+      const result = node.handleSyncLog({ fromIndex: 1, term: 1, leaderId: 'node-1' });
+      expect(result.entries).toHaveLength(2);
+      expect(result.entries.map((entry) => entry.index)).toEqual([1, 2]);
+      expect(result.commitIndex).toBe(2);
+    });
   });
 
   describe('handleClientWrite', () => {
@@ -379,6 +421,25 @@ describe('RaftNode', () => {
       expect(node.log.getLength()).toBe(2);
       expect(node.commitIndex).toBe(2);
       expect(node.lastApplied).toBe(2);
+    });
+
+    it('applies only committed entries from sync-log response', async () => {
+      node.leaderId = 'http://node-2:3002';
+      node.currentTerm = 1;
+      (rpc.syncLog as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        term: 1,
+        entries: [
+          { index: 1, term: 1, stroke: makeStroke('s1') },
+          { index: 2, term: 1, stroke: makeStroke('s2') },
+          { index: 3, term: 1, stroke: makeStroke('s3') },
+        ],
+        commitIndex: 2,
+      } satisfies SyncLogResult);
+
+      await node.requestCatchUp();
+      expect(node.log.getLength()).toBe(2);
+      expect(node.commitIndex).toBe(2);
+      expect(node.getStrokes('b1').map((stroke) => stroke.id)).toEqual(['s1', 's2']);
     });
 
     it('tries all peers when no leader known', async () => {

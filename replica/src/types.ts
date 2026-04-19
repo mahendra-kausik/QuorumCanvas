@@ -8,6 +8,8 @@ export interface Stroke {
   width: number;
   points: [number, number][];
   timestamp: number;
+  action?: 'stroke' | 'undo_stroke' | 'redo_stroke';
+  targetStrokeId?: string;
 }
 
 // --- RAFT node state ---

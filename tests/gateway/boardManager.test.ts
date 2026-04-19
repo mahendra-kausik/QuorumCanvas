@@ -80,6 +80,31 @@ describe('BoardManager', () => {
     expect(bm.getStrokes('board-1')).toEqual([stroke]);
   });
 
+  it('applies undo and redo compensation events', () => {
+    bm.getOrCreateBoard('board-1');
+    const stroke = makeStroke({ id: 's1' });
+    bm.addStroke('board-1', stroke);
+    expect(bm.getStrokes('board-1').map((s) => s.id)).toEqual(['s1']);
+
+    bm.addStroke('board-1', makeStroke({
+      id: 'u1',
+      action: 'undo_stroke',
+      targetStrokeId: 's1',
+      points: [],
+      width: 0,
+    }));
+    expect(bm.getStrokes('board-1')).toEqual([]);
+
+    bm.addStroke('board-1', makeStroke({
+      id: 'r1',
+      action: 'redo_stroke',
+      targetStrokeId: 's1',
+      points: [],
+      width: 0,
+    }));
+    expect(bm.getStrokes('board-1').map((s) => s.id)).toEqual(['s1']);
+  });
+
   it('getStrokes returns empty array for non-existent board', () => {
     expect(bm.getStrokes('nope')).toEqual([]);
   });

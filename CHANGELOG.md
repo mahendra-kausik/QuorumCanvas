@@ -2,6 +2,34 @@
 
 All notable changes to the Mini-RAFT project will be documented in this file.
 
+## [2026-04-20] - Assignment Reliability, Dashboard, And Bonus Extensions
+### Added
+- Docker compose hot-reload stack with bind mounts, healthchecks, startup health ordering, frontend service, debug ports, and `replica4`
+- Wrapper bind-mount folders: `replica1/`, `replica2/`, `replica3/`, `replica4/`
+- Gateway cluster status aggregation endpoint (`GET /cluster-status`) and health endpoint (`GET /health`)
+- Frontend RAFT dashboard page (`/dashboard`) showing leader, term, replica state, commit index, log length, and health
+- Network partition demo script: `scripts/test-network-partition.sh`
+- Log artifact folder and guidance: `logs/README.md`
+- New tests:
+	- gateway cluster status aggregation
+	- board-manager undo/redo compensation behavior
+	- frontend rollback on RAFT write failure
+	- frontend undo/redo compensation event flow
+	- replica committed overwrite protection and committed-only sync behavior
+	- 4-replica majority integration behavior
+### Changed
+- RAFT node catch-up and mismatch handling now proactively sync committed entries when followers report log mismatch/length
+- `/sync-log` now returns committed entries only from requested index onward
+- Gateway remote client now uses bounded retry rounds with exponential backoff during temporary no-leader windows
+- Gateway message handler now emits structured retryable write errors with `code`, `strokeId`, and `retryable`
+- Frontend board logic now tracks pending optimistic writes and performs deterministic rollback on commit failure
+- Frontend toolbar now includes undo/redo controls backed by compensation entries
+- Failover script now captures status snapshots and compose logs into timestamped `logs/` run folders
+### Fixed
+- Committed log entries can no longer be truncated or overwritten by conflicting AppendEntries
+- Optimistic local strokes are no longer left permanently visible when distributed commit fails
+- Gateway TypeScript leader-hint narrowing issue in retry path
+
 ## [2026-03-15] - Integration Tests and Docker Failover Script
 ### Added
 - In-process integration tests (7 tests) covering: leader election, stroke replication, leader crash + re-election, writes after failover, follower catch-up via /sync-log, write rejection with leader hint, stale leader demotion

@@ -4,6 +4,7 @@ import { BoardManager } from '../../gateway/src/boardManager.js';
 import { LocalRaftClient } from '../../gateway/src/raftClient.js';
 import type WebSocket from 'ws';
 import type { Stroke } from '../../gateway/src/types.js';
+import type { RaftClient } from '../../gateway/src/raftClient.js';
 
 function mockWs(): WebSocket {
   return {
@@ -104,5 +105,24 @@ describe('MessageHandler', () => {
   it('handles stroke with missing data', async () => {
     await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke: null }), connInfo);
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'error', message: 'Invalid stroke data' }));
+  });
+
+  it('returns structured error on RAFT write failure', async () => {
+    const failingRaftClient: RaftClient = {
+      submitStroke: vi.fn().mockResolvedValue(false),
+      getStrokes: vi.fn().mockResolvedValue([]),
+    };
+    handler = new MessageHandler(bm, failingRaftClient);
+
+    const stroke = makeStroke({ id: 'stroke-fail' });
+    await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke }), connInfo);
+
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'error',
+      message: 'Failed to submit stroke',
+      code: 'RAFT_WRITE_FAILED',
+      strokeId: 'stroke-fail',
+      retryable: true,
+    }));
   });
 });

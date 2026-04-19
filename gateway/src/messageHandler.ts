@@ -60,7 +60,13 @@ export class MessageHandler {
 
     const success = await this.raftClient.submitStroke(stroke);
     if (!success) {
-      this.boardManager.sendTo(ws, { type: 'error', message: 'Failed to submit stroke' });
+      this.boardManager.sendTo(ws, {
+        type: 'error',
+        message: 'Failed to submit stroke',
+        code: 'RAFT_WRITE_FAILED',
+        strokeId: stroke.id,
+        retryable: true,
+      });
       return;
     }
 

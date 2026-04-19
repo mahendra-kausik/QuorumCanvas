@@ -74,6 +74,29 @@ describe('RemoteRaftClient', () => {
     expect(result).toBe(false);
   });
 
+  it('submitStroke retries on temporary no-leader responses', async () => {
+    let calls = 0;
+    const { server, url } = await createMockReplica(() => {
+      calls++;
+      if (calls < 3) {
+        return {
+          status: 200,
+          body: { success: false },
+        };
+      }
+      return {
+        status: 200,
+        body: { success: true },
+      };
+    });
+    servers.push(server);
+
+    const client = new RemoteRaftClient([url]);
+    const result = await client.submitStroke(makeStroke('retry-stroke'));
+    expect(result).toBe(true);
+    expect(calls).toBeGreaterThanOrEqual(3);
+  });
+
   it('getStrokes returns strokes from available peer', async () => {
     const stroke = makeStroke();
     const { server, url } = await createMockReplica((req) => {

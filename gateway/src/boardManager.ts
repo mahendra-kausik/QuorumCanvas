@@ -4,6 +4,8 @@ import type { Stroke, ServerMessage } from './types.js';
 export interface Board {
   boardId: string;
   strokes: Stroke[];
+  events: Stroke[];
+  undoneStrokeIds: Set<string>;
   users: Map<string, WebSocket>;
 }
 
@@ -13,7 +15,13 @@ export class BoardManager {
   getOrCreateBoard(boardId: string): Board {
     let board = this.boards.get(boardId);
     if (!board) {
-      board = { boardId, strokes: [], users: new Map() };
+      board = {
+        boardId,
+        strokes: [],
+        events: [],
+        undoneStrokeIds: new Set<string>(),
+        users: new Map(),
+      };
       this.boards.set(boardId, board);
     }
     return board;
@@ -36,9 +44,34 @@ export class BoardManager {
   }
 
   addStroke(boardId: string, stroke: Stroke): void {
-    const board = this.boards.get(boardId);
-    if (!board) return;
-    board.strokes.push(stroke);
+    const board = this.getOrCreateBoard(boardId);
+    const action = stroke.action ?? 'stroke';
+
+    board.events.push(stroke);
+
+    if (action === 'undo_stroke' && stroke.targetStrokeId) {
+      board.undoneStrokeIds.add(stroke.targetStrokeId);
+      board.strokes = board.strokes.filter((entry) => entry.id !== stroke.targetStrokeId);
+      return;
+    }
+
+    if (action === 'redo_stroke' && stroke.targetStrokeId) {
+      board.undoneStrokeIds.delete(stroke.targetStrokeId);
+      const alreadyVisible = board.strokes.some((entry) => entry.id === stroke.targetStrokeId);
+      if (!alreadyVisible) {
+        const target = board.events.find(
+          (event) => (event.action ?? 'stroke') === 'stroke' && event.id === stroke.targetStrokeId,
+        );
+        if (target) {
+          board.strokes.push(target);
+        }
+      }
+      return;
+    }
+
+    if (!board.undoneStrokeIds.has(stroke.id)) {
+      board.strokes.push(stroke);
+    }
   }
 
   getStrokes(boardId: string): Stroke[] {

@@ -14,6 +14,7 @@ export interface ConnectionInfo {
 
 export function createWsServer(server: Server) {
   const boardManager = new BoardManager();
+  const maxUsersPerBoard = parseInt(process.env.MAX_USERS_PER_BOARD ?? '50', 10);
 
   const raftPeers = process.env.RAFT_PEERS;
   const raftClient = raftPeers
@@ -38,6 +39,12 @@ export function createWsServer(server: Server) {
 
     if (!boardId || !userId) {
       ws.send(JSON.stringify({ type: 'error', message: 'Missing boardId or userId query parameter' }));
+      ws.close();
+      return;
+    }
+
+    if (boardManager.getUserCount(boardId) >= maxUsersPerBoard) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Board user limit reached' }));
       ws.close();
       return;
     }

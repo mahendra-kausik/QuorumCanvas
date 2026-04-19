@@ -15,14 +15,22 @@ export function Board() {
     return <Navigate to="/" replace />;
   }
 
-  const { strokes, status, addStroke } = useBoard({ boardId, userId });
+  const { strokes, status, addStroke, undoLastStroke, redoLastStroke, canUndo, canRedo } = useBoard({ boardId, userId });
 
   return (
     <div style={{ padding: 16, maxWidth: 1920, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Board: {boardId}</h2>
       </div>
-      <Toolbar activeColor={color} onColorChange={setColor} connectionStatus={status} />
+      <Toolbar
+        activeColor={color}
+        onColorChange={setColor}
+        connectionStatus={status}
+        onUndo={undoLastStroke}
+        onRedo={redoLastStroke}
+        canUndo={canUndo}
+        canRedo={canRedo}
+      />
       <Canvas
         boardId={boardId}
         userId={userId}

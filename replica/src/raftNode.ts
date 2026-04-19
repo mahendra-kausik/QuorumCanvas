@@ -35,6 +35,8 @@ export class RaftNode {
   matchIndex = new Map<string, number>();
 
   // Board state derived from committed entries
+  private boardEvents = new Map<string, Stroke[]>();
+  private undoneStrokeIds = new Map<string, Set<string>>();
   private boardStrokes = new Map<string, Stroke[]>();
 
   constructor(
@@ -214,6 +216,15 @@ export class RaftNode {
     for (const entry of args.entries) {
       const existing = this.log.getEntry(entry.index);
       if (existing && existing.term !== entry.term) {
+        if (entry.index <= this.commitIndex) {
+          log('warn', 'append_entries_committed_conflict', {
+            index: entry.index,
+            commitIndex: this.commitIndex,
+            existingTerm: existing.term,
+            incomingTerm: entry.term,
+          });
+          return { term: this.currentTerm, success: false, responderId: this.replicaId, currentLogLength: this.log.getLength() };
+        }
         this.log.truncateFrom(entry.index);
       }
       if (!this.log.getEntry(entry.index)) {
@@ -284,8 +295,9 @@ export class RaftNode {
             this.nextIndex.set(peer, nextIdx + entries.length);
             this.matchIndex.set(peer, nextIdx + entries.length - 1);
           } else {
-            // Decrement nextIndex for retry
-            this.nextIndex.set(peer, Math.max(1, nextIdx - 1));
+            const fromIndex = Math.max(1, result.currentLogLength + 1);
+            this.nextIndex.set(peer, fromIndex);
+            await this.syncCommittedEntries(peer, fromIndex);
           }
         } catch {
           // Network error — will retry on next heartbeat
@@ -312,6 +324,49 @@ export class RaftNode {
 
     if (this.state === NodeState.Leader) {
       this.updateCommitIndex();
+    }
+  }
+
+  private async syncCommittedEntries(peer: string, fromIndex: number): Promise<void> {
+    if (this.state !== NodeState.Leader) return;
+    if (fromIndex > this.commitIndex) return;
+
+    const prevLogIndex = fromIndex - 1;
+    const prevEntry = this.log.getEntry(prevLogIndex);
+    const entries = this.log
+      .getEntriesFrom(fromIndex)
+      .filter((entry) => entry.index <= this.commitIndex);
+
+    if (entries.length === 0) return;
+
+    const args: AppendEntriesArgs = {
+      term: this.currentTerm,
+      leaderId: this.replicaId,
+      prevLogIndex,
+      prevLogTerm: prevEntry?.term ?? 0,
+      entries,
+      leaderCommit: this.commitIndex,
+    };
+
+    try {
+      const result = await this.rpcClient.appendEntries(peer, args);
+      if (result.term > this.currentTerm) {
+        this.becomeFollower(result.term);
+        return;
+      }
+
+      if (result.success) {
+        const lastSynced = entries[entries.length - 1].index;
+        this.nextIndex.set(peer, lastSynced + 1);
+        this.matchIndex.set(peer, lastSynced);
+        log('info', 'sync_committed_done', { peer, fromIndex, toIndex: lastSynced });
+      } else {
+        const retryFrom = Math.max(1, result.currentLogLength + 1);
+        this.nextIndex.set(peer, retryFrom);
+        log('warn', 'sync_committed_retry_needed', { peer, fromIndex, retryFrom });
+      }
+    } catch {
+      log('warn', 'sync_committed_failed', { peer, fromIndex });
     }
   }
 
@@ -348,13 +403,66 @@ export class RaftNode {
       this.lastApplied++;
       const entry = this.log.getEntry(this.lastApplied);
       if (entry) {
-        const { stroke } = entry;
-        if (!this.boardStrokes.has(stroke.boardId)) {
-          this.boardStrokes.set(stroke.boardId, []);
-        }
-        this.boardStrokes.get(stroke.boardId)!.push(stroke);
-        log('info', 'entry_applied', { index: this.lastApplied, boardId: stroke.boardId, strokeId: stroke.id });
+        this.applyBoardEvent(entry.stroke);
+        log('info', 'entry_applied', {
+          index: this.lastApplied,
+          boardId: entry.stroke.boardId,
+          strokeId: entry.stroke.id,
+          action: entry.stroke.action ?? 'stroke',
+        });
       }
+    }
+  }
+
+  private ensureBoardState(boardId: string): void {
+    if (!this.boardEvents.has(boardId)) {
+      this.boardEvents.set(boardId, []);
+    }
+    if (!this.undoneStrokeIds.has(boardId)) {
+      this.undoneStrokeIds.set(boardId, new Set<string>());
+    }
+    if (!this.boardStrokes.has(boardId)) {
+      this.boardStrokes.set(boardId, []);
+    }
+  }
+
+  private applyBoardEvent(event: Stroke): void {
+    const boardId = event.boardId;
+    this.ensureBoardState(boardId);
+
+    const events = this.boardEvents.get(boardId)!;
+    const undone = this.undoneStrokeIds.get(boardId)!;
+    const visible = this.boardStrokes.get(boardId)!;
+    const action = event.action ?? 'stroke';
+
+    events.push(event);
+
+    if (action === 'undo_stroke' && event.targetStrokeId) {
+      undone.add(event.targetStrokeId);
+      const nextVisible = visible.filter((stroke) => stroke.id !== event.targetStrokeId);
+      this.boardStrokes.set(boardId, nextVisible);
+      return;
+    }
+
+    if (action === 'redo_stroke' && event.targetStrokeId) {
+      undone.delete(event.targetStrokeId);
+      const alreadyVisible = visible.some((stroke) => stroke.id === event.targetStrokeId);
+      if (!alreadyVisible) {
+        const target = events.find(
+          (strokeEvent) =>
+            (strokeEvent.action ?? 'stroke') === 'stroke' &&
+            strokeEvent.id === event.targetStrokeId,
+        );
+        if (target) {
+          this.boardStrokes.set(boardId, [...visible, target]);
+        }
+      }
+      return;
+    }
+
+    // Default drawing event
+    if (!undone.has(event.id)) {
+      this.boardStrokes.set(boardId, [...visible, event]);
     }
   }
 
@@ -365,9 +473,13 @@ export class RaftNode {
       this.becomeFollower(args.term);
     }
 
+    const committedEntries = this.log
+      .getEntriesFrom(args.fromIndex)
+      .filter((entry) => entry.index <= this.commitIndex);
+
     return {
       term: this.currentTerm,
-      entries: this.log.getEntriesFrom(args.fromIndex),
+      entries: committedEntries,
       commitIndex: this.commitIndex,
     };
   }
@@ -423,7 +535,9 @@ export class RaftNode {
             this.matchIndex.set(peer, entry.index);
             return { peer, success: true };
           } else {
-            this.nextIndex.set(peer, Math.max(1, nextIdx - 1));
+            const fromIndex = Math.max(1, result.currentLogLength + 1);
+            this.nextIndex.set(peer, fromIndex);
+            await this.syncCommittedEntries(peer, fromIndex);
             return { peer, success: false };
           }
         }),
@@ -479,7 +593,23 @@ export class RaftNode {
           this.becomeFollower(result.term);
         }
 
-        for (const entry of result.entries) {
+        const committedEntries = result.entries.filter((entry) => entry.index <= result.commitIndex);
+
+        for (const entry of committedEntries) {
+          const existing = this.log.getEntry(entry.index);
+          if (existing && existing.term !== entry.term) {
+            if (entry.index <= this.commitIndex) {
+              log('warn', 'catch_up_committed_conflict', {
+                index: entry.index,
+                commitIndex: this.commitIndex,
+                existingTerm: existing.term,
+                incomingTerm: entry.term,
+              });
+              continue;
+            }
+            this.log.truncateFrom(entry.index);
+          }
+
           if (!this.log.getEntry(entry.index)) {
             this.log.append(entry);
           }

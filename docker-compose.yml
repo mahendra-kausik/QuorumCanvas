@@ -1,53 +1,169 @@
 services:
-  gateway:
-    build: ./gateway
-    ports:
-      - "8080:8080"
-    environment:
-      PORT: "8080"
-      RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
-    networks:
-      - raft-net
-    depends_on:
-      - replica1
-      - replica2
-      - replica3
-    restart: unless-stopped
-
   replica1:
     build: ./replica
+    command: npm run dev
     ports:
       - "3001:3001"
+      - "9231:9231"
+    volumes:
+      - ./replica:/app
+      - /app/node_modules
+      - ./replica1:/app/instance
     environment:
       REPLICA_ID: "replica1"
       PORT: "3001"
-      PEERS: "http://replica2:3002,http://replica3:3003"
+      PEERS: "http://replica2:3002,http://replica3:3003,http://replica4:3004"
     networks:
       - raft-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
   replica2:
     build: ./replica
+    command: npm run dev
     ports:
       - "3002:3002"
+      - "9232:9232"
+    volumes:
+      - ./replica:/app
+      - /app/node_modules
+      - ./replica2:/app/instance
     environment:
       REPLICA_ID: "replica2"
       PORT: "3002"
-      PEERS: "http://replica1:3001,http://replica3:3003"
+      PEERS: "http://replica1:3001,http://replica3:3003,http://replica4:3004"
     networks:
       - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
   replica3:
     build: ./replica
+    command: npm run dev
     ports:
       - "3003:3003"
+      - "9233:9233"
+    volumes:
+      - ./replica:/app
+      - /app/node_modules
+      - ./replica3:/app/instance
     environment:
       REPLICA_ID: "replica3"
       PORT: "3003"
-      PEERS: "http://replica1:3001,http://replica2:3002"
+      PEERS: "http://replica1:3001,http://replica2:3002,http://replica4:3004"
     networks:
       - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3003/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  replica4:
+    build: ./replica
+    command: npm run dev
+    ports:
+      - "3004:3004"
+      - "9234:9234"
+    volumes:
+      - ./replica:/app
+      - /app/node_modules
+      - ./replica4:/app/instance
+    environment:
+      REPLICA_ID: "replica4"
+      PORT: "3004"
+      PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
+    networks:
+      - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+      replica3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3004/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  gateway:
+    build: ./gateway
+    command: npm run dev
+    ports:
+      - "8080:8080"
+      - "9229:9229"
+    volumes:
+      - ./gateway:/app
+      - /app/node_modules
+    environment:
+      PORT: "8080"
+      RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003,http://replica4:3004"
+    networks:
+      - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+      replica3:
+        condition: service_healthy
+      replica4:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    ports:
+      - "5173:5173"
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      VITE_WS_URL: "ws://localhost:8080/ws"
+      VITE_GATEWAY_HTTP_URL: "http://localhost:8080"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - raft-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
 networks:
