@@ -43,7 +43,8 @@ export function createWsServer(server: Server) {
       return;
     }
 
-    if (boardManager.getUserCount(boardId) >= maxUsersPerBoard) {
+    const userAlreadyConnected = boardManager.hasUser(boardId, userId);
+    if (!userAlreadyConnected && boardManager.getUserCount(boardId) >= maxUsersPerBoard) {
       ws.send(JSON.stringify({ type: 'error', message: 'Board user limit reached' }));
       ws.close();
       return;
@@ -65,8 +66,10 @@ export function createWsServer(server: Server) {
     ws.on('close', () => {
       console.log(`[disconnect] board=${boardId} user=${userId}`);
       connections.delete(ws);
-      boardManager.leaveBoard(boardId, userId);
-      boardManager.broadcast(boardId, { type: 'user_left', userId });
+      const fullyDisconnected = boardManager.leaveBoard(boardId, userId, ws);
+      if (fullyDisconnected) {
+        boardManager.broadcast(boardId, { type: 'user_left', userId }, ws);
+      }
     });
   });
 

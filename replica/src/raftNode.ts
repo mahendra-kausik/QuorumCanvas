@@ -120,37 +120,67 @@ export class RaftNode {
     const majority = Math.floor((this.peers.length + 1) / 2) + 1;
     let votesGranted = 1; // self-vote
 
-    const results = await Promise.allSettled(
-      this.peers.map((peer) => this.rpcClient.requestVote(peer, args)),
-    );
+    await new Promise<void>((resolve) => {
+      let pendingReplies = this.peers.length;
+      let settled = false;
 
-    for (const result of results) {
-      if (this.state !== NodeState.Candidate) return; // stepped down during election
+      const finalizeElection = (): void => {
+        if (settled) return;
 
-      if (result.status === 'fulfilled') {
-        const reply = result.value;
-
-        if (reply.term > this.currentTerm) {
-          this.becomeFollower(reply.term);
-          return;
+        if (this.state === NodeState.Candidate && this.currentTerm === args.term) {
+          if (votesGranted >= majority) {
+            this.becomeLeader();
+          } else {
+            log('info', 'election_failed', { votesGranted, majority });
+            // Stay candidate, election timer will trigger retry with new random timeout
+            this.timerManager.resetElectionTimer();
+          }
         }
 
-        if (reply.voteGranted) {
-          votesGranted++;
-          log('info', 'vote_received', { from: reply.responderId, votesGranted, majority });
-        } else {
-          log('info', 'vote_denied', { from: reply.responderId });
-        }
+        settled = true;
+        resolve();
+      };
+
+      if (pendingReplies === 0) {
+        finalizeElection();
+        return;
       }
-    }
 
-    if (this.state === NodeState.Candidate && votesGranted >= majority) {
-      this.becomeLeader();
-    } else if (this.state === NodeState.Candidate) {
-      log('info', 'election_failed', { votesGranted, majority });
-      // Stay candidate, election timer will trigger retry with new random timeout
-      this.timerManager.resetElectionTimer();
-    }
+      for (const peer of this.peers) {
+        this.rpcClient.requestVote(peer, args)
+          .then((reply) => {
+            if (settled || this.state !== NodeState.Candidate || this.currentTerm !== args.term) {
+              return;
+            }
+
+            if (reply.term > this.currentTerm) {
+              this.becomeFollower(reply.term);
+              finalizeElection();
+              return;
+            }
+
+            if (reply.voteGranted) {
+              votesGranted++;
+              log('info', 'vote_received', { from: reply.responderId, votesGranted, majority });
+              if (votesGranted >= majority) {
+                finalizeElection();
+              }
+              return;
+            }
+
+            log('info', 'vote_denied', { from: reply.responderId });
+          })
+          .catch(() => {
+            // Ignore peer RPC errors; quorum can still be formed from other peers.
+          })
+          .finally(() => {
+            pendingReplies--;
+            if (pendingReplies === 0) {
+              finalizeElection();
+            }
+          });
+      }
+    });
   }
 
   // --- RequestVote handler ---
@@ -303,16 +333,29 @@ export class RaftNode {
           // Network error — will retry on next heartbeat
         }
       } else {
-        // Pure heartbeat
-        const hbArgs: HeartbeatArgs = {
+        // Empty AppendEntries acts as heartbeat and also detects stale followers.
+        const args: AppendEntriesArgs = {
           term: this.currentTerm,
           leaderId: this.replicaId,
+          prevLogIndex,
+          prevLogTerm: prevEntry?.term ?? 0,
+          entries: [],
           leaderCommit: this.commitIndex,
         };
         try {
-          const result = await this.rpcClient.sendHeartbeat(peer, hbArgs);
+          const result = await this.rpcClient.appendEntries(peer, args);
           if (result.term > this.currentTerm) {
             this.becomeFollower(result.term);
+            return;
+          }
+
+          if (result.success) {
+            const knownMatch = this.matchIndex.get(peer) ?? 0;
+            this.matchIndex.set(peer, Math.max(knownMatch, prevLogIndex));
+          } else {
+            const fromIndex = Math.max(1, result.currentLogLength + 1);
+            this.nextIndex.set(peer, fromIndex);
+            await this.syncCommittedEntries(peer, fromIndex);
           }
         } catch {
           // Network error

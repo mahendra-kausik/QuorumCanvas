@@ -30,7 +30,7 @@ export function createApp(config: ReplicaConfig, deps?: { rpcClient?: RpcClient;
   app.use(express.json());
 
   const rpcClient = deps?.rpcClient ?? new HttpRpcClient();
-  const timerManager = deps?.timerManager ?? new DefaultTimerManager();
+  const timerManager = deps?.timerManager ?? new DefaultTimerManager({ replicaId: config.replicaId });
   const raftNode = new RaftNode(config.replicaId, config.peers, rpcClient, timerManager);
 
   app.get('/health', (_req, res) => {

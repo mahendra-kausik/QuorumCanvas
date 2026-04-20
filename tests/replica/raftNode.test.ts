@@ -181,6 +181,21 @@ describe('RaftNode', () => {
       expect(node.state).toBe(NodeState.Leader);
     });
 
+    it('becomes leader without waiting for unreachable peer once majority is reached', async () => {
+      (rpc.requestVote as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(voteResult(true, 1, 'node-2'))
+        .mockImplementationOnce(() => new Promise<RequestVoteResult>(() => {}));
+
+      await Promise.race([
+        node.runElection(),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('election timed out waiting for unreachable peer')), 300);
+        }),
+      ]);
+
+      expect(node.state).toBe(NodeState.Leader);
+    });
+
     it('steps down if a peer has higher term', async () => {
       (rpc.requestVote as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(voteResult(false, 5, 'node-2'))

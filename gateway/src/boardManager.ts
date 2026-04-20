@@ -6,7 +6,7 @@ export interface Board {
   strokes: Stroke[];
   events: Stroke[];
   undoneStrokeIds: Set<string>;
-  users: Map<string, WebSocket>;
+  users: Map<string, Set<WebSocket>>;
 }
 
 export class BoardManager {
@@ -33,14 +33,35 @@ export class BoardManager {
 
   joinBoard(boardId: string, userId: string, ws: WebSocket): Stroke[] {
     const board = this.getOrCreateBoard(boardId);
-    board.users.set(userId, ws);
+    let userSockets = board.users.get(userId);
+    if (!userSockets) {
+      userSockets = new Set<WebSocket>();
+      board.users.set(userId, userSockets);
+    }
+    userSockets.add(ws);
     return board.strokes;
   }
 
-  leaveBoard(boardId: string, userId: string): void {
+  hasUser(boardId: string, userId: string): boolean {
     const board = this.boards.get(boardId);
-    if (!board) return;
-    board.users.delete(userId);
+    if (!board) return false;
+    return board.users.has(userId);
+  }
+
+  leaveBoard(boardId: string, userId: string, ws: WebSocket): boolean {
+    const board = this.boards.get(boardId);
+    if (!board) return false;
+
+    const userSockets = board.users.get(userId);
+    if (!userSockets) return false;
+
+    userSockets.delete(ws);
+    if (userSockets.size === 0) {
+      board.users.delete(userId);
+      return true;
+    }
+
+    return false;
   }
 
   addStroke(boardId: string, stroke: Stroke): void {
@@ -78,13 +99,15 @@ export class BoardManager {
     return this.boards.get(boardId)?.strokes ?? [];
   }
 
-  broadcast(boardId: string, message: ServerMessage, excludeUserId?: string): void {
+  broadcast(boardId: string, message: ServerMessage, excludeWs?: WebSocket): void {
     const board = this.boards.get(boardId);
     if (!board) return;
     const data = JSON.stringify(message);
-    for (const [userId, ws] of board.users) {
-      if (userId !== excludeUserId && ws.readyState === ws.OPEN) {
-        ws.send(data);
+    for (const userSockets of board.users.values()) {
+      for (const ws of userSockets) {
+        if (ws !== excludeWs && ws.readyState === ws.OPEN) {
+          ws.send(data);
+        }
       }
     }
   }
