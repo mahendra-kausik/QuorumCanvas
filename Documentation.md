@@ -177,8 +177,6 @@ stateDiagram-v2
 ## Failure Handling Design
 - Leader crash:
   - Followers time out, election runs, new leader forms, gateway retries writes.
-- Stale leader:
-  - Any higher term in RPC responses demotes stale leader to follower.
 - Split vote:
   - Candidate remains candidate, election timer resets, retry occurs on next timeout.
 - Follower mismatch:
