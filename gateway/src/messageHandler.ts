@@ -36,6 +36,7 @@ export class MessageHandler {
   }
 
   private async handleJoin(ws: WebSocket, boardId: string, userId: string): Promise<void> {
+    const isExistingUser = this.boardManager.hasUser(boardId, userId);
     this.boardManager.joinBoard(boardId, userId, ws);
 
     const strokes = await this.raftClient.getStrokes(boardId);
@@ -46,10 +47,12 @@ export class MessageHandler {
       strokes,
     });
 
-    this.boardManager.broadcast(boardId, {
-      type: 'user_joined',
-      userId,
-    }, userId);
+    if (!isExistingUser) {
+      this.boardManager.broadcast(boardId, {
+        type: 'user_joined',
+        userId,
+      }, ws);
+    }
   }
 
   private async handleStroke(ws: WebSocket, stroke: Stroke, connectionInfo: { boardId: string; userId: string }): Promise<void> {
@@ -60,13 +63,19 @@ export class MessageHandler {
 
     const success = await this.raftClient.submitStroke(stroke);
     if (!success) {
-      this.boardManager.sendTo(ws, { type: 'error', message: 'Failed to submit stroke' });
+      this.boardManager.sendTo(ws, {
+        type: 'error',
+        message: 'Failed to submit stroke',
+        code: 'RAFT_WRITE_FAILED',
+        strokeId: stroke.id,
+        retryable: true,
+      });
       return;
     }
 
     this.boardManager.broadcast(connectionInfo.boardId, {
       type: 'stroke_broadcast',
       stroke,
-    }, connectionInfo.userId);
+    }, ws);
   }
 }

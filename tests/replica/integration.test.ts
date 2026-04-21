@@ -55,15 +55,15 @@ async function waitForLeader(replicas: TestReplica[], timeoutMs = 5000): Promise
 describe('RAFT Integration', () => {
   let replicas: TestReplica[] = [];
 
-  async function startCluster(): Promise<TestReplica[]> {
+  async function startCluster(replicaCount = 3): Promise<TestReplica[]> {
     const basePort = nextPort;
-    nextPort += 3;
-    const ids = ['node-1', 'node-2', 'node-3'];
-    const ports = [basePort, basePort + 1, basePort + 2];
+    nextPort += replicaCount;
+    const ids = Array.from({ length: replicaCount }, (_, i) => `node-${i + 1}`);
+    const ports = Array.from({ length: replicaCount }, (_, i) => basePort + i);
     const urls = ports.map((p) => `http://localhost:${p}`);
 
     replicas = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < replicaCount; i++) {
       const peers = urls.filter((_, j) => j !== i);
       const config: ReplicaConfig = { replicaId: ids[i], port: ports[i], peers };
       const { app, raftNode } = createApp(config);
@@ -151,6 +151,24 @@ describe('RAFT Integration', () => {
 
     const result = await newLeader!.node.handleClientWrite(makeStroke('s2'));
     expect(result.success).toBe(true);
+  }, 15000);
+
+  it('requires majority of 3 in a 4-replica cluster', async () => {
+    await startCluster(4);
+    const leader = await waitForLeader(replicas);
+
+    await wait(300);
+    const followers = replicas.filter((r) => !r.stopped && r.id !== leader.id);
+    await stopReplica(followers[0]);
+
+    const withThreeAlive = await leader.node.handleClientWrite(makeStroke('s-majority-ok'));
+    expect(withThreeAlive.success).toBe(true);
+
+    await stopReplica(followers[1]);
+    await wait(200);
+
+    const withTwoAlive = await leader.node.handleClientWrite(makeStroke('s-majority-fail'));
+    expect(withTwoAlive.success).toBe(false);
   }, 15000);
 
   it('restarted node catches up via sync-log', async () => {

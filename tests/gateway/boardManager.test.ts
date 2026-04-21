@@ -65,12 +65,33 @@ describe('BoardManager', () => {
     const ws = mockWs();
     bm.joinBoard('board-1', 'user-1', ws);
     expect(bm.getUserCount('board-1')).toBe(1);
-    bm.leaveBoard('board-1', 'user-1');
+    const fullyDisconnected = bm.leaveBoard('board-1', 'user-1', ws);
+    expect(fullyDisconnected).toBe(true);
     expect(bm.getUserCount('board-1')).toBe(0);
   });
 
   it('leaveBoard is a no-op for non-existent board', () => {
-    expect(() => bm.leaveBoard('nope', 'user-1')).not.toThrow();
+    const ws = mockWs();
+    expect(() => bm.leaveBoard('nope', 'user-1', ws)).not.toThrow();
+  });
+
+  it('supports multiple sockets for the same user', () => {
+    const ws1 = mockWs();
+    const ws2 = mockWs();
+
+    bm.joinBoard('board-1', 'user-1', ws1);
+    bm.joinBoard('board-1', 'user-1', ws2);
+
+    // User count stays unique per user ID, not per tab/socket.
+    expect(bm.getUserCount('board-1')).toBe(1);
+
+    const firstClose = bm.leaveBoard('board-1', 'user-1', ws1);
+    expect(firstClose).toBe(false);
+    expect(bm.getUserCount('board-1')).toBe(1);
+
+    const secondClose = bm.leaveBoard('board-1', 'user-1', ws2);
+    expect(secondClose).toBe(true);
+    expect(bm.getUserCount('board-1')).toBe(0);
   });
 
   it('adds strokes to a board', () => {
@@ -78,6 +99,31 @@ describe('BoardManager', () => {
     const stroke = makeStroke();
     bm.addStroke('board-1', stroke);
     expect(bm.getStrokes('board-1')).toEqual([stroke]);
+  });
+
+  it('applies undo and redo compensation events', () => {
+    bm.getOrCreateBoard('board-1');
+    const stroke = makeStroke({ id: 's1' });
+    bm.addStroke('board-1', stroke);
+    expect(bm.getStrokes('board-1').map((s) => s.id)).toEqual(['s1']);
+
+    bm.addStroke('board-1', makeStroke({
+      id: 'u1',
+      action: 'undo_stroke',
+      targetStrokeId: 's1',
+      points: [],
+      width: 0,
+    }));
+    expect(bm.getStrokes('board-1')).toEqual([]);
+
+    bm.addStroke('board-1', makeStroke({
+      id: 'r1',
+      action: 'redo_stroke',
+      targetStrokeId: 's1',
+      points: [],
+      width: 0,
+    }));
+    expect(bm.getStrokes('board-1').map((s) => s.id)).toEqual(['s1']);
   });
 
   it('getStrokes returns empty array for non-existent board', () => {
@@ -92,7 +138,7 @@ describe('BoardManager', () => {
     bm.joinBoard('board-1', 'user-2', ws2);
     bm.joinBoard('board-1', 'user-3', ws3);
 
-    bm.broadcast('board-1', { type: 'user_joined', userId: 'user-1' }, 'user-1');
+    bm.broadcast('board-1', { type: 'user_joined', userId: 'user-1' }, ws1);
 
     expect(ws1.send).not.toHaveBeenCalled();
     expect(ws2.send).toHaveBeenCalledWith(JSON.stringify({ type: 'user_joined', userId: 'user-1' }));

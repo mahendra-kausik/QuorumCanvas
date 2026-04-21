@@ -6,6 +6,8 @@ export interface Stroke {
   width: number;
   points: [number, number][];
   timestamp: number;
+  action?: 'stroke' | 'undo_stroke' | 'redo_stroke';
+  targetStrokeId?: string;
 }
 
 // Client → Server messages
@@ -47,6 +49,9 @@ export interface UserLeftMessage {
 export interface ErrorMessage {
   type: 'error';
   message: string;
+  code?: string;
+  strokeId?: string;
+  retryable?: boolean;
 }
 
 export type ServerMessage =

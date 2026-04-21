@@ -13,6 +13,7 @@ export const CANVAS_WIDTH = 1920;
 export const CANVAS_HEIGHT = 1080;
 
 export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080/ws';
+export const GATEWAY_HTTP_URL = import.meta.env.VITE_GATEWAY_HTTP_URL || 'http://localhost:8080';
 
 export const RECONNECT_BASE_DELAY = 1000;
 export const RECONNECT_MAX_DELAY = 30000;

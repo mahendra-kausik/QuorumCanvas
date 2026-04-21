@@ -120,6 +120,39 @@ describe('WebSocket Server', () => {
     expect(broadcast.stroke.id).toBe('s1');
   });
 
+  it('broadcasts strokes between tabs of the same user', async () => {
+    await startServer();
+
+    const ws1 = connect('board-1', 'user-1');
+    await waitForOpen(ws1);
+    ws1.send(JSON.stringify({ type: 'join', boardId: 'board-1', userId: 'user-1' }));
+    await waitForMessage(ws1); // join_ack
+
+    const ws2 = connect('board-1', 'user-1');
+    await waitForOpen(ws2);
+    ws2.send(JSON.stringify({ type: 'join', boardId: 'board-1', userId: 'user-1' }));
+    await waitForMessage(ws2); // join_ack
+
+    const sameUserBroadcastPromise = waitForMessage(ws2);
+
+    ws1.send(JSON.stringify({
+      type: 'stroke',
+      stroke: {
+        id: 'same-user-s1',
+        boardId: 'board-1',
+        userId: 'user-1',
+        color: '#E74C3C',
+        width: 3,
+        points: [[0, 0], [10, 10]],
+        timestamp: Date.now(),
+      },
+    }));
+
+    const broadcast = JSON.parse(await sameUserBroadcastPromise);
+    expect(broadcast.type).toBe('stroke_broadcast');
+    expect(broadcast.stroke.id).toBe('same-user-s1');
+  });
+
   it('broadcasts user_left on disconnect', async () => {
     await startServer();
 

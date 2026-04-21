@@ -19,12 +19,21 @@ export function BoardJoin() {
     }
   };
 
+  const handleDashboard = () => {
+    navigate('/dashboard');
+  };
+
   return (
     <div data-testid="board-join" style={{ maxWidth: 400, margin: '80px auto', textAlign: 'center' }}>
       <h1>Mini-RAFT Drawing Board</h1>
       <button data-testid="create-board" onClick={handleCreate} style={{ fontSize: 18, padding: '12px 24px', marginBottom: 32 }}>
         Create Board
       </button>
+      <div style={{ marginBottom: 20 }}>
+        <button data-testid="open-dashboard" onClick={handleDashboard} style={{ fontSize: 14, padding: '8px 14px' }}>
+          Open RAFT Dashboard
+        </button>
+      </div>
       <form onSubmit={handleJoin}>
         <div style={{ display: 'flex', gap: 8 }}>
           <input

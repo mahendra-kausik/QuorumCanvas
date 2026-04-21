@@ -4,7 +4,9 @@ import type { Stroke, ServerMessage } from './types.js';
 export interface Board {
   boardId: string;
   strokes: Stroke[];
-  users: Map<string, WebSocket>;
+  events: Stroke[];
+  undoneStrokeIds: Set<string>;
+  users: Map<string, Set<WebSocket>>;
 }
 
 export class BoardManager {
@@ -13,7 +15,13 @@ export class BoardManager {
   getOrCreateBoard(boardId: string): Board {
     let board = this.boards.get(boardId);
     if (!board) {
-      board = { boardId, strokes: [], users: new Map() };
+      board = {
+        boardId,
+        strokes: [],
+        events: [],
+        undoneStrokeIds: new Set<string>(),
+        users: new Map(),
+      };
       this.boards.set(boardId, board);
     }
     return board;
@@ -25,33 +33,81 @@ export class BoardManager {
 
   joinBoard(boardId: string, userId: string, ws: WebSocket): Stroke[] {
     const board = this.getOrCreateBoard(boardId);
-    board.users.set(userId, ws);
+    let userSockets = board.users.get(userId);
+    if (!userSockets) {
+      userSockets = new Set<WebSocket>();
+      board.users.set(userId, userSockets);
+    }
+    userSockets.add(ws);
     return board.strokes;
   }
 
-  leaveBoard(boardId: string, userId: string): void {
+  hasUser(boardId: string, userId: string): boolean {
     const board = this.boards.get(boardId);
-    if (!board) return;
-    board.users.delete(userId);
+    if (!board) return false;
+    return board.users.has(userId);
+  }
+
+  leaveBoard(boardId: string, userId: string, ws: WebSocket): boolean {
+    const board = this.boards.get(boardId);
+    if (!board) return false;
+
+    const userSockets = board.users.get(userId);
+    if (!userSockets) return false;
+
+    userSockets.delete(ws);
+    if (userSockets.size === 0) {
+      board.users.delete(userId);
+      return true;
+    }
+
+    return false;
   }
 
   addStroke(boardId: string, stroke: Stroke): void {
-    const board = this.boards.get(boardId);
-    if (!board) return;
-    board.strokes.push(stroke);
+    const board = this.getOrCreateBoard(boardId);
+    const action = stroke.action ?? 'stroke';
+
+    board.events.push(stroke);
+
+    if (action === 'undo_stroke' && stroke.targetStrokeId) {
+      board.undoneStrokeIds.add(stroke.targetStrokeId);
+      board.strokes = board.strokes.filter((entry) => entry.id !== stroke.targetStrokeId);
+      return;
+    }
+
+    if (action === 'redo_stroke' && stroke.targetStrokeId) {
+      board.undoneStrokeIds.delete(stroke.targetStrokeId);
+      const alreadyVisible = board.strokes.some((entry) => entry.id === stroke.targetStrokeId);
+      if (!alreadyVisible) {
+        const target = board.events.find(
+          (event) => (event.action ?? 'stroke') === 'stroke' && event.id === stroke.targetStrokeId,
+        );
+        if (target) {
+          board.strokes.push(target);
+        }
+      }
+      return;
+    }
+
+    if (!board.undoneStrokeIds.has(stroke.id)) {
+      board.strokes.push(stroke);
+    }
   }
 
   getStrokes(boardId: string): Stroke[] {
     return this.boards.get(boardId)?.strokes ?? [];
   }
 
-  broadcast(boardId: string, message: ServerMessage, excludeUserId?: string): void {
+  broadcast(boardId: string, message: ServerMessage, excludeWs?: WebSocket): void {
     const board = this.boards.get(boardId);
     if (!board) return;
     const data = JSON.stringify(message);
-    for (const [userId, ws] of board.users) {
-      if (userId !== excludeUserId && ws.readyState === ws.OPEN) {
-        ws.send(data);
+    for (const userSockets of board.users.values()) {
+      for (const ws of userSockets) {
+        if (ws !== excludeWs && ws.readyState === ws.OPEN) {
+          ws.send(data);
+        }
       }
     }
   }

@@ -14,6 +14,7 @@ export interface ConnectionInfo {
 
 export function createWsServer(server: Server) {
   const boardManager = new BoardManager();
+  const maxUsersPerBoard = parseInt(process.env.MAX_USERS_PER_BOARD ?? '50', 10);
 
   const raftPeers = process.env.RAFT_PEERS;
   const raftClient = raftPeers
@@ -42,6 +43,13 @@ export function createWsServer(server: Server) {
       return;
     }
 
+    const userAlreadyConnected = boardManager.hasUser(boardId, userId);
+    if (!userAlreadyConnected && boardManager.getUserCount(boardId) >= maxUsersPerBoard) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Board user limit reached' }));
+      ws.close();
+      return;
+    }
+
     const connectionInfo: ConnectionInfo = { boardId, userId };
     connections.set(ws, connectionInfo);
 
@@ -58,8 +66,10 @@ export function createWsServer(server: Server) {
     ws.on('close', () => {
       console.log(`[disconnect] board=${boardId} user=${userId}`);
       connections.delete(ws);
-      boardManager.leaveBoard(boardId, userId);
-      boardManager.broadcast(boardId, { type: 'user_left', userId });
+      const fullyDisconnected = boardManager.leaveBoard(boardId, userId, ws);
+      if (fullyDisconnected) {
+        boardManager.broadcast(boardId, { type: 'user_left', userId }, ws);
+      }
     });
   });
 

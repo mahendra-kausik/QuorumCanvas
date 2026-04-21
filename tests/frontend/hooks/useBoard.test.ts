@@ -109,4 +109,63 @@ describe('useBoard', () => {
     act(() => ws.simulateMessage({ type: 'user_left', userId: 'user2' }));
     expect(result.current.users).not.toContain('user2');
   });
+
+  it('rolls back optimistic stroke on RAFT write failure', async () => {
+    const { result } = renderHook(() => useBoard({ boardId: 'abc', userId: 'user1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.simulateOpen());
+
+    const stroke: Stroke = {
+      id: 's-rollback', boardId: 'abc', userId: 'user1', color: '#E74C3C',
+      width: 3, points: [[0, 0], [20, 20]], timestamp: 3000,
+    };
+
+    act(() => result.current.addStroke(stroke));
+    expect(result.current.strokes.some((s) => s.id === 's-rollback')).toBe(true);
+
+    act(() => ws.simulateMessage({
+      type: 'error',
+      message: 'Failed to submit stroke',
+      code: 'RAFT_WRITE_FAILED',
+      strokeId: 's-rollback',
+      retryable: true,
+    }));
+
+    expect(result.current.strokes.some((s) => s.id === 's-rollback')).toBe(false);
+  });
+
+  it('supports undo and redo as compensation events', async () => {
+    const { result } = renderHook(() => useBoard({ boardId: 'abc', userId: 'user1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.simulateOpen());
+    ws.send.mockClear();
+
+    const stroke: Stroke = {
+      id: 's-undo', boardId: 'abc', userId: 'user1', color: '#E74C3C',
+      width: 3, points: [[0, 0], [20, 20]], timestamp: 3000,
+    };
+
+    act(() => result.current.addStroke(stroke));
+    expect(result.current.canUndo).toBe(true);
+    expect(result.current.strokes.some((s) => s.id === 's-undo')).toBe(true);
+
+    act(() => result.current.undoLastStroke());
+    expect(result.current.strokes.some((s) => s.id === 's-undo')).toBe(false);
+    expect(result.current.canRedo).toBe(true);
+
+    const undoMessage = JSON.parse((ws.send as ReturnType<typeof vi.fn>).mock.calls[1][0] as string) as { type: string; stroke: Stroke };
+    expect(undoMessage.type).toBe('stroke');
+    expect(undoMessage.stroke.action).toBe('undo_stroke');
+    expect(undoMessage.stroke.targetStrokeId).toBe('s-undo');
+
+    act(() => result.current.redoLastStroke());
+    expect(result.current.strokes.some((s) => s.id === 's-undo')).toBe(true);
+
+    const redoMessage = JSON.parse((ws.send as ReturnType<typeof vi.fn>).mock.calls[2][0] as string) as { type: string; stroke: Stroke };
+    expect(redoMessage.type).toBe('stroke');
+    expect(redoMessage.stroke.action).toBe('redo_stroke');
+    expect(redoMessage.stroke.targetStrokeId).toBe('s-undo');
+  });
 });
