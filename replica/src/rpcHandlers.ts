@@ -24,6 +24,11 @@ export function createRpcRouter(raftNode: RaftNode): Router {
     res.json(result);
   });
 
+  router.post('/install-snapshot', (req, res) => {
+    const result = raftNode.handleInstallSnapshot(req.body);
+    res.json(result);
+  });
+
   router.post('/client-write', async (req, res) => {
     const result = await raftNode.handleClientWrite(req.body.stroke);
     res.json(result);

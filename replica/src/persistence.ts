@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { LogEntry } from './types.js';
+import type { LogEntry, Snapshot } from './types.js';
 
 // Durable Raft state: {currentTerm, votedFor, commitIndex} in state.json, and the log as an
 // append-only WAL (one JSON LogEntry per line). Both are fsynced before the RPC reply that
@@ -22,6 +22,8 @@ export interface Persistence {
   loadLog(): LogEntry[];
   appendLog(entry: LogEntry): void;
   rewriteLog(entries: LogEntry[]): void;
+  loadSnapshot(): Snapshot | null;
+  saveSnapshot(snapshot: Snapshot): void;
 }
 
 // Default when no DATA_DIR is configured (e.g. unit tests) — behaves like today's in-memory node.
@@ -35,6 +37,10 @@ export class MemoryPersistence implements Persistence {
   }
   appendLog(): void {}
   rewriteLog(): void {}
+  loadSnapshot(): Snapshot | null {
+    return null;
+  }
+  saveSnapshot(): void {}
 }
 
 // fsync the containing directory too, so the file's directory-entry survives a crash
@@ -69,11 +75,13 @@ function atomicWrite(filePath: string, data: string): void {
 export class FilePersistence implements Persistence {
   private readonly statePath: string;
   private readonly logPath: string;
+  private readonly snapshotPath: string;
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.statePath = path.join(dataDir, 'state.json');
     this.logPath = path.join(dataDir, 'log.jsonl');
+    this.snapshotPath = path.join(dataDir, 'snapshot.json');
   }
 
   loadState(): PersistedState {
@@ -117,9 +125,19 @@ export class FilePersistence implements Persistence {
   }
 
   // Full rewrite on the (rare) truncate-on-conflict path — atomic so a crash mid-rewrite
-  // never leaves a partially-truncated WAL.
+  // never leaves a partially-truncated WAL. Also used by compact()/installSnapshot() to
+  // drop the WAL prefix a new snapshot has made redundant.
   rewriteLog(entries: LogEntry[]): void {
     const data = entries.map((entry) => `${JSON.stringify(entry)}\n`).join('');
     atomicWrite(this.logPath, data);
+  }
+
+  loadSnapshot(): Snapshot | null {
+    if (!fs.existsSync(this.snapshotPath)) return null;
+    return JSON.parse(fs.readFileSync(this.snapshotPath, 'utf8')) as Snapshot;
+  }
+
+  saveSnapshot(snapshot: Snapshot): void {
+    atomicWrite(this.snapshotPath, JSON.stringify(snapshot));
   }
 }

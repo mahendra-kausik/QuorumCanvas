@@ -20,7 +20,14 @@ export function createApp(config: ReplicaConfig, deps?: { rpcClient?: RpcClient;
   // Replay (term/vote/commitIndex + WAL) happens synchronously inside the RaftNode
   // constructor, before this replica can vote, be elected, or serve traffic.
   const persistence = config.dataDir ? new FilePersistence(config.dataDir) : new MemoryPersistence();
-  const raftNode = new RaftNode(config.replicaId, config.peers, rpcClient, timerManager, persistence);
+  const raftNode = new RaftNode(
+    config.replicaId,
+    config.peers,
+    rpcClient,
+    timerManager,
+    persistence,
+    config.snapshotThresholdEntries ?? RAFT_TIMING.snapshotThresholdEntries,
+  );
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', replicaId: config.replicaId });

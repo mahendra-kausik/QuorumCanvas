@@ -87,6 +87,36 @@ export interface SyncLogResult {
   term: number;
   entries: LogEntry[];
   commitIndex: number;
+  // Present when the requested fromIndex falls before the leader's snapshot boundary — the
+  // leader can no longer serve individual entries that far back, so it sends the snapshot
+  // itself for the follower to install before it can continue with the returned `entries`.
+  snapshot?: Snapshot;
+}
+
+// --- Snapshot (L2 log compaction) ---
+
+// Board state up to lastIncludedIndex, so the WAL prefix that produced it can be dropped.
+// `boards` is the per-board *event list* (not just visible strokes) — replaying it through
+// raftNode.applyBoardEvent deterministically rebuilds undo/redo state too (one apply path).
+export interface Snapshot {
+  lastIncludedIndex: number;
+  lastIncludedTerm: number;
+  boards: Record<string, Stroke[]>;
+}
+
+// --- RPC: InstallSnapshot (L2 — leader → far-behind follower) ---
+
+export interface InstallSnapshotArgs {
+  term: number;
+  leaderId: string;
+  lastIncludedIndex: number;
+  lastIncludedTerm: number;
+  boards: Record<string, Stroke[]>;
+}
+
+export interface InstallSnapshotResult {
+  term: number;
+  responderId: string;
 }
 
 // --- Client write (gateway → leader) ---
@@ -119,6 +149,7 @@ export interface RpcClient {
   appendEntries(peer: string, args: AppendEntriesArgs): Promise<AppendEntriesResult>;
   sendHeartbeat(peer: string, args: HeartbeatArgs): Promise<HeartbeatResult>;
   syncLog(peer: string, args: SyncLogArgs): Promise<SyncLogResult>;
+  installSnapshot(peer: string, args: InstallSnapshotArgs): Promise<InstallSnapshotResult>;
 }
 
 // --- Timer interface (for dependency injection) ---

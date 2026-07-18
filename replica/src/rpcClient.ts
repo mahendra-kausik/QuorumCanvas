@@ -8,6 +8,8 @@ import type {
   HeartbeatResult,
   SyncLogArgs,
   SyncLogResult,
+  InstallSnapshotArgs,
+  InstallSnapshotResult,
 } from './types.js';
 
 import { RAFT_TIMING } from './config.js';
@@ -51,5 +53,9 @@ export class HttpRpcClient implements RpcClient {
 
   async syncLog(peer: string, args: SyncLogArgs): Promise<SyncLogResult> {
     return this.post<SyncLogResult>(`${peer}/sync-log`, args);
+  }
+
+  async installSnapshot(peer: string, args: InstallSnapshotArgs): Promise<InstallSnapshotResult> {
+    return this.post<InstallSnapshotResult>(`${peer}/install-snapshot`, args);
   }
 }

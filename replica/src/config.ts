@@ -8,6 +8,8 @@ export interface ReplicaConfig {
   peers: string[];
   // Directory for the WAL + state.json (L1 durability). Unset → in-memory only (e.g. tests).
   dataDir?: string;
+  // Override RAFT_TIMING.snapshotThresholdEntries (L2). Unset → use the default.
+  snapshotThresholdEntries?: number;
 }
 
 export function parseConfig(env: Record<string, string | undefined>): ReplicaConfig {
@@ -22,7 +24,11 @@ export function parseConfig(env: Record<string, string | undefined>): ReplicaCon
 
   const dataDir = env.DATA_DIR || undefined;
 
-  return { replicaId, port, peers, dataDir };
+  const snapshotThresholdEntries = env.SNAPSHOT_THRESHOLD
+    ? parseInt(env.SNAPSHOT_THRESHOLD, 10)
+    : undefined;
+
+  return { replicaId, port, peers, dataDir, snapshotThresholdEntries };
 }
 
 // Raft timing, milliseconds. The election-timeout window must sit well above the heartbeat
@@ -39,4 +45,7 @@ export const RAFT_TIMING = {
   rpcTimeoutMs: 2000,
   // Delay before a freshly started node asks the cluster for catch-up, letting it stabilize.
   catchUpDelayMs: 1000,
+  // Snapshot after this many committed entries since the last snapshot (L2 log compaction).
+  // Tuned against benchmarks at L8; small enough here to keep the WAL bounded on a free-tier disk.
+  snapshotThresholdEntries: 500,
 } as const;

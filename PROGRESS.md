@@ -3,7 +3,42 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-18 — Layer 1 (Durable persistence) COMPLETE.** Gate passed (evidence below).
+- **2026-07-18 — Layer 2 (Snapshot & log compaction) COMPLETE.** Gate passed (evidence below).
+  - `replica/src/raftLog.ts` reworked to be offset-addressed: `lastIncludedIndex`/
+    `lastIncludedTerm` seeded from a loaded snapshot; `getEntry`/`getLastIndex`/
+    `getEntriesFrom`/`truncateFrom` all offset-adjusted; new `getTermAt` (term at an index
+    including the boundary itself), `compact(uptoIndex, term)`, `installSnapshot(...)`.
+  - `persistence.ts`: `Snapshot` type (`lastIncludedIndex/Term` + per-board event lists) moved
+    to `types.ts` to avoid a circular import; `FilePersistence` adds `snapshot.json` via the
+    existing atomic-write primitive; `MemoryPersistence` no-ops.
+  - `raftNode.ts`: restores board state + `lastApplied`/`commitIndex` from a loaded snapshot on
+    construct (before log replay); `maybeSnapshot()`/`takeSnapshot()` triggered at the end of
+    every `applyCommitted()` once `commitIndex - lastIncludedIndex >= snapshotThreshold` (new
+    6th ctor param, defaults to `RAFT_TIMING.snapshotThresholdEntries`); snapshot persisted
+    **before** `log.compact()` so a crash between the two loses nothing.
+  - New **InstallSnapshot RPC** (`types.ts`, `rpcClient.ts`, `rpcHandlers.ts` `/install-snapshot`):
+    leader pushes it from `sendHeartbeats`/`syncCommittedEntries`/`handleClientWrite` when a
+    peer's `nextIndex` falls at/below the compaction boundary; a follower's own `requestCatchUp`
+    (cold-start path) also pulls it via an extended `SyncLogResult.snapshot` field. Both funnel
+    through one shared `applySnapshot()`.
+  - `config.ts` adds `snapshotThresholdEntries: 500` + `SNAPSHOT_THRESHOLD` env override;
+    `docker-compose.yml` sets it to `20` per replica for demoability.
+  - **Bug caught by the e2e gate, not unit tests:** the leader-side `prevLogTerm` computation at
+    4 call sites still read `getEntry(idx).term`, which correctly returns `undefined` once the
+    leader's own log compacted past that index — silently sent `prevLogTerm: 0`, followers
+    rejected forever (`append_entries_mismatch` looping). Fixed by switching all 4 sites to the
+    new `getTermAt`. Logged as D12.
+  - **Gate evidence:** `tsc --noEmit` clean; `npm test` green — replica **93/93** (88 prior + 5
+    new in `tests/replica/snapshot.test.ts`: bounded log after threshold, snapshot+tail recovery
+    on restart, offset correctness across the compaction boundary, AppendEntries consistency at
+    the boundary, wiped-follower InstallSnapshot + tail), gateway **41/41**, frontend **41/41**
+    unaffected. Docker e2e (`SNAPSHOT_THRESHOLD=20`): drove 30 committed strokes to the leader →
+    all 3 replicas reached `commitIndex=30`, on-disk `log.jsonl` bounded to **10 lines** (not
+    30) with `snapshot.json` present on each host bind mount; `docker rm -f` replica3 + wiped its
+    instance dir + restarted → logs show `install_snapshot_applied(lastIncludedIndex=20)` then
+    `catch_up_done(logLength=10, commitIndex=30)` — recovered via snapshot + tail, not full
+    replay; board state (30 strokes) identical across all 3 replicas (**RESULT: PASS**).
+- Prior: Layer 1 (Durable persistence) COMPLETE.
   - New `replica/src/persistence.ts`: `Persistence` interface, `FilePersistence` (JSONL WAL +
     fsynced `state.json` holding `{currentTerm, votedFor, commitIndex}`, atomic temp-file +
     rename + dir-fsync, torn-tail-tolerant loader), `MemoryPersistence` default (D11).
@@ -43,14 +78,16 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 2 — Snapshot & log compaction** (awaiting approval per PRIME DIRECTIVE): periodic
-  board-state snapshot + `lastIncludedIndex/lastIncludedTerm`, truncate WAL prefix,
-  `InstallSnapshot`-style catch-up for a follower far behind the leader's log start.
+- **Layer 3 — Correct reads + explicit leader redirect** (awaiting approval per PRIME
+  DIRECTIVE): ReadIndex (or leader lease) so `/board-state` can't serve stale committed state
+  from a minority-partitioned leader; replace the `leaderId` substring-match redirect
+  (`remoteRaftClient.ts:39`) with an explicit address.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
    split-brain / lost commits.~~ → **FIXED in L1** (D11).
-2. **[HIGH]** No snapshot / log compaction — unbounded log, full replay on restart. → **L2**
+2. ~~**[HIGH]** No snapshot / log compaction — unbounded log, full replay on restart.~~ →
+   **FIXED in L2** (D12).
 3. **[HIGH]** Stale reads on minority-partition leader (no ReadIndex/lease). → **L3**
 4. **[MED]** Unbounded AppendEntries payload (no batch cap / backpressure). → **L4**
 5. **[MED]** `nextIndex`/`matchIndex` race between heartbeat timer and `handleClientWrite`. → **L4**

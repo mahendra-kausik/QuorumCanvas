@@ -18,6 +18,59 @@
 
 ---
 
+### D12 — L2 snapshot & log compaction implementation choices
+- Date: 2026-07-18
+- Context: L1 made the WAL durable but unbounded — a cold restart replays the full log, and a
+  follower that fell behind the leader's log start had no way to catch up. Implemented across
+  `replica/src/raftLog.ts`, `persistence.ts`, `raftNode.ts`, plus a new InstallSnapshot RPC.
+- Decision:
+  - **Log becomes offset-addressed.** `RaftLog` gained `lastIncludedIndex`/`lastIncludedTerm`;
+    every accessor (`getEntry`, `getLastIndex`, `getEntriesFrom`, `truncateFrom`) is offset by
+    it, and callers keep using absolute Raft indices unaware compaction happened. `getTermAt`
+    added specifically for the AppendEntries `prevLogTerm` consistency check, which must still
+    validate at the snapshot boundary itself (where no individual `LogEntry` exists anymore).
+  - **Snapshot payload = per-board event list** (not just visible strokes), replayed through the
+    existing `applyBoardEvent` — one derivation path for both normal log replay and snapshot
+    restore, so undo/redo state reconstructs correctly instead of needing a second serialization
+    format.
+  - **Snapshot before compact, always.** `takeSnapshot()` persists `snapshot.json` (atomic
+    write, same durability as `state.json`) *before* calling `log.compact()`, so a crash between
+    the two loses nothing — the WAL still has what the unused snapshot would have covered.
+  - **InstallSnapshot has two entry paths, one apply path.** A leader proactively pushes it in
+    `sendHeartbeats`/`syncCommittedEntries`/`handleClientWrite` when a peer's `nextIndex` has
+    fallen at or below the log's compaction boundary (the entries it needs no longer exist
+    individually). A follower's own `requestCatchUp` (used at cold-start) also pulls it via an
+    extended `SyncLogResult.snapshot` field when `fromIndex` predates the leader's boundary —
+    without this the boot-time catch-up path would silently apply `undefined` for compacted
+    indices (a real bug caught while implementing, not just theoretical). Both paths funnel
+    through one shared `applySnapshot()` on `RaftNode`.
+  - **Threshold:** `RAFT_TIMING.snapshotThresholdEntries = 500` (config default, matches
+    PROJECT_PLAN §3), overridable via `SNAPSHOT_THRESHOLD` env / 6th `RaftNode` ctor param —
+    `docker-compose.yml` sets it to `20` for demoability without needing hundreds of strokes to
+    exercise compaction; real tuning deferred to L8 benchmarks.
+- Why: keeps disk and cold-restart time bounded (the whole point of L2) while reusing L1's
+  atomic-write primitive and the existing board-apply function rather than inventing new ones.
+- Alternatives considered: snapshotting the flattened `boardStrokes` (visible-only) instead of
+  the event list — rejected, it would lose undo/redo history and need a second apply path;
+  copy-on-write log structure instead of offset indexing — rejected as unnecessary complexity
+  for this log's access patterns (sequential append, rare truncate, rare compact).
+- Tradeoffs / risks: `takeSnapshot()` and `applySnapshot()` are synchronous full-state
+  serializations — fine at demo/interview scale, would need incremental/streaming snapshots at
+  much larger board sizes (out of scope, noted for defense). InstallSnapshot ships the entire
+  snapshot in one RPC body (no chunking, unlike the paper's `InstallSnapshot` offset/chunk
+  fields) — acceptable given board state size at this project's scale; a defensible simplification
+  to name explicitly if asked.
+- Discovered while implementing: the leader-side `prevLogTerm` computation (`getEntry(idx).term`)
+  broke the moment the leader's *own* log compacted past a peer's `nextIndex`, since `getEntry`
+  correctly returns `undefined` past the boundary — silently sending `prevLogTerm: 0` and
+  causing `append_entries_mismatch` forever. Fixed by switching all four leader-side call sites
+  to `getTermAt`, caught live via the Docker e2e gate run (not just unit tests), which is exactly
+  why the gate drives real committed writes past the threshold rather than trusting the design
+  on paper.
+- Supersedes: none (extends D11).
+
+---
+
 ### D11 — L1 persistence implementation choices (finalizes D05)
 - Date: 2026-07-18
 - Context: D05 committed to a hand-rolled WAL + fsynced `state.json` but left the format,

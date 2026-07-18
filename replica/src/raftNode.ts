@@ -1,6 +1,7 @@
 import { RaftLog } from './raftLog.js';
 import { MemoryPersistence, type Persistence } from './persistence.js';
 import { log } from './logger.js';
+import { RAFT_TIMING } from './config.js';
 import {
   NodeState,
   type RpcClient,
@@ -13,6 +14,8 @@ import {
   type HeartbeatResult,
   type SyncLogArgs,
   type SyncLogResult,
+  type InstallSnapshotArgs,
+  type InstallSnapshotResult,
   type LogEntry,
   type Stroke,
   type ClientWriteResult,
@@ -47,13 +50,23 @@ export class RaftNode {
     private rpcClient: RpcClient,
     private timerManager: TimerManager,
     private persistence: Persistence = new MemoryPersistence(),
+    private snapshotThreshold: number = RAFT_TIMING.snapshotThresholdEntries,
   ) {
     this.log = new RaftLog(persistence);
+
+    // A snapshot's board state and lastIncludedIndex must be restored before applyCommitted()
+    // walks the log below, or lastApplied would start at 0 and try to replay entries the
+    // snapshot already compacted away.
+    const snapshot = persistence.loadSnapshot();
+    if (snapshot) {
+      this.restoreBoardState(snapshot.boards);
+      this.lastApplied = snapshot.lastIncludedIndex;
+    }
 
     const saved = persistence.loadState();
     this.currentTerm = saved.currentTerm;
     this.votedFor = saved.votedFor;
-    this.commitIndex = saved.commitIndex;
+    this.commitIndex = Math.max(saved.commitIndex, this.log.getLastIncludedIndex());
     // Rebuild board state from the persisted log so a solo/cold restart shows it
     // immediately, without waiting on a leader to re-advance commit (DECISIONS D05).
     this.applyCommitted();
@@ -262,17 +275,27 @@ export class RaftNode {
       this.timerManager.resetElectionTimer();
     }
 
-    // Check log consistency
-    if (args.prevLogIndex > 0) {
+    // Check log consistency. Below our snapshot boundary (lastIncludedIndex) we no longer hold
+    // individual entries — but everything up to that boundary is already committed, and Raft's
+    // committed-entry invariant guarantees it can't conflict with the leader's log, so treat it
+    // as consistent (mirrors the InstallSnapshot RPC's role in the paper, §7).
+    const lastIncluded = this.log.getLastIncludedIndex();
+    if (args.prevLogIndex > lastIncluded) {
       const prevEntry = this.log.getEntry(args.prevLogIndex);
       if (!prevEntry || prevEntry.term !== args.prevLogTerm) {
         log('warn', 'append_entries_mismatch', { prevLogIndex: args.prevLogIndex, prevLogTerm: args.prevLogTerm, myLogLength: this.log.getLength() });
+        return { term: this.currentTerm, success: false, responderId: this.replicaId, currentLogLength: this.log.getLength() };
+      }
+    } else if (args.prevLogIndex === lastIncluded && lastIncluded > 0) {
+      if (this.log.getLastIncludedTerm() !== args.prevLogTerm) {
+        log('warn', 'append_entries_mismatch_at_boundary', { prevLogIndex: args.prevLogIndex, prevLogTerm: args.prevLogTerm });
         return { term: this.currentTerm, success: false, responderId: this.replicaId, currentLogLength: this.log.getLength() };
       }
     }
 
     // Append new entries (truncate conflicts)
     for (const entry of args.entries) {
+      if (entry.index <= lastIncluded) continue; // already covered by our snapshot
       const existing = this.log.getEntry(entry.index);
       if (existing && existing.term !== entry.term) {
         if (entry.index <= this.commitIndex) {
@@ -331,8 +354,19 @@ export class RaftNode {
 
     const promises = this.peers.map(async (peer) => {
       const nextIdx = this.nextIndex.get(peer) ?? this.log.getLastIndex() + 1;
+
+      // The entries this peer needs (from nextIdx) have already been compacted out of our log
+      // — AppendEntries can no longer reconstruct prevLogTerm for it. Send the snapshot instead.
+      if (nextIdx <= this.log.getLastIncludedIndex()) {
+        await this.sendInstallSnapshot(peer);
+        return;
+      }
+
       const prevLogIndex = nextIdx - 1;
-      const prevEntry = this.log.getEntry(prevLogIndex);
+      // getTermAt, not getEntry().term — prevLogIndex can sit exactly at (or, after our own
+      // compaction races ahead, land on) the snapshot boundary, where getEntry() no longer
+      // has an entry to read a term from even though the term itself is still known.
+      const prevLogTerm = this.log.getTermAt(prevLogIndex);
       const entries = this.log.getEntriesFrom(nextIdx);
 
       if (entries.length > 0) {
@@ -341,7 +375,7 @@ export class RaftNode {
           term: this.currentTerm,
           leaderId: this.replicaId,
           prevLogIndex,
-          prevLogTerm: prevEntry?.term ?? 0,
+          prevLogTerm,
           entries,
           leaderCommit: this.commitIndex,
         };
@@ -369,7 +403,7 @@ export class RaftNode {
           term: this.currentTerm,
           leaderId: this.replicaId,
           prevLogIndex,
-          prevLogTerm: prevEntry?.term ?? 0,
+          prevLogTerm,
           entries: [],
           leaderCommit: this.commitIndex,
         };
@@ -405,8 +439,13 @@ export class RaftNode {
     if (this.state !== NodeState.Leader) return;
     if (fromIndex > this.commitIndex) return;
 
+    if (fromIndex <= this.log.getLastIncludedIndex()) {
+      await this.sendInstallSnapshot(peer);
+      return;
+    }
+
     const prevLogIndex = fromIndex - 1;
-    const prevEntry = this.log.getEntry(prevLogIndex);
+    const prevLogTerm = this.log.getTermAt(prevLogIndex);
     const entries = this.log
       .getEntriesFrom(fromIndex)
       .filter((entry) => entry.index <= this.commitIndex);
@@ -417,7 +456,7 @@ export class RaftNode {
       term: this.currentTerm,
       leaderId: this.replicaId,
       prevLogIndex,
-      prevLogTerm: prevEntry?.term ?? 0,
+      prevLogTerm,
       entries,
       leaderCommit: this.commitIndex,
     };
@@ -487,6 +526,105 @@ export class RaftNode {
         });
       }
     }
+    this.maybeSnapshot();
+  }
+
+  // --- Snapshot & log compaction (L2) ---
+
+  // Called after every point applyCommitted() advances lastApplied. Snapshotting the derived
+  // board state lets us drop the WAL prefix that produced it, bounding on-disk log growth.
+  private maybeSnapshot(): void {
+    if (this.commitIndex - this.log.getLastIncludedIndex() < this.snapshotThreshold) return;
+    this.takeSnapshot();
+  }
+
+  private takeSnapshot(): void {
+    const boards: Record<string, Stroke[]> = {};
+    for (const [boardId, events] of this.boardEvents) {
+      boards[boardId] = events;
+    }
+    const term = this.log.getTermAt(this.commitIndex);
+    // Persist the snapshot BEFORE compacting the log — if we crash in between, the WAL still
+    // has the entries the (unused) snapshot would have covered, so nothing is lost.
+    this.persistence.saveSnapshot({ lastIncludedIndex: this.commitIndex, lastIncludedTerm: term, boards });
+    this.log.compact(this.commitIndex, term);
+    log('info', 'snapshot_taken', { lastIncludedIndex: this.commitIndex, lastIncludedTerm: term });
+  }
+
+  // Rebuilds board state by replaying a snapshot's per-board event lists through the same
+  // applyBoardEvent path normal log replay uses — one source of truth for the derivation.
+  private restoreBoardState(boards: Record<string, Stroke[]>): void {
+    this.boardEvents = new Map();
+    this.undoneStrokeIds = new Map();
+    this.boardStrokes = new Map();
+    for (const events of Object.values(boards)) {
+      for (const event of events) {
+        this.applyBoardEvent(event);
+      }
+    }
+  }
+
+  // --- InstallSnapshot handler (follower, when the leader's log start has outrun it) ---
+
+  handleInstallSnapshot(args: InstallSnapshotArgs): InstallSnapshotResult {
+    if (args.term < this.currentTerm) {
+      return { term: this.currentTerm, responderId: this.replicaId };
+    }
+    if (args.term > this.currentTerm || this.state !== NodeState.Follower) {
+      this.becomeFollower(args.term, args.leaderId);
+    } else {
+      this.leaderId = args.leaderId;
+      this.timerManager.resetElectionTimer();
+    }
+
+    // Stale or already-covered snapshot — ack without regressing our (further-ahead) state.
+    if (args.lastIncludedIndex <= this.commitIndex) {
+      return { term: this.currentTerm, responderId: this.replicaId };
+    }
+
+    this.applySnapshot(args.lastIncludedIndex, args.lastIncludedTerm, args.boards);
+    log('info', 'install_snapshot_applied', { lastIncludedIndex: args.lastIncludedIndex });
+
+    return { term: this.currentTerm, responderId: this.replicaId };
+  }
+
+  // Installs a snapshot pushed or pulled from a leader: replaces the log's compaction boundary,
+  // rebuilds board state from it, and advances commitIndex/lastApplied to match. Shared by the
+  // leader-push path (handleInstallSnapshot) and the follower-pull path (requestCatchUp).
+  private applySnapshot(lastIncludedIndex: number, lastIncludedTerm: number, boards: Record<string, Stroke[]>): void {
+    this.log.installSnapshot(lastIncludedIndex, lastIncludedTerm);
+    this.restoreBoardState(boards);
+    this.commitIndex = lastIncludedIndex;
+    this.lastApplied = lastIncludedIndex;
+    this.persistence.saveSnapshot({ lastIncludedIndex, lastIncludedTerm, boards });
+    this.persistState();
+  }
+
+  // Sends the leader's current snapshot to a peer whose nextIndex has fallen behind the log's
+  // compaction boundary (the entries it needs no longer exist individually). On success, advances
+  // nextIndex/matchIndex past the boundary so the next heartbeat resumes with normal AppendEntries.
+  private async sendInstallSnapshot(peer: string): Promise<void> {
+    const snapshot = this.persistence.loadSnapshot();
+    if (!snapshot) return; // nothing to send — shouldn't happen if lastIncludedIndex > 0
+    const args: InstallSnapshotArgs = {
+      term: this.currentTerm,
+      leaderId: this.replicaId,
+      lastIncludedIndex: snapshot.lastIncludedIndex,
+      lastIncludedTerm: snapshot.lastIncludedTerm,
+      boards: snapshot.boards,
+    };
+    try {
+      const result = await this.rpcClient.installSnapshot(peer, args);
+      if (result.term > this.currentTerm) {
+        this.becomeFollower(result.term);
+        return;
+      }
+      this.nextIndex.set(peer, snapshot.lastIncludedIndex + 1);
+      this.matchIndex.set(peer, snapshot.lastIncludedIndex);
+      log('info', 'install_snapshot_sent', { peer, lastIncludedIndex: snapshot.lastIncludedIndex });
+    } catch {
+      log('warn', 'install_snapshot_send_failed', { peer });
+    }
   }
 
   private ensureBoardState(boardId: string): void {
@@ -548,6 +686,15 @@ export class RaftNode {
       this.becomeFollower(args.term);
     }
 
+    // Caller wants entries from before our snapshot boundary — we no longer hold them
+    // individually, so hand back the snapshot itself for the caller to install first.
+    if (args.fromIndex <= this.log.getLastIncludedIndex()) {
+      const snapshot = this.persistence.loadSnapshot();
+      if (snapshot) {
+        return { term: this.currentTerm, entries: [], commitIndex: this.commitIndex, snapshot };
+      }
+    }
+
     const committedEntries = this.log
       .getEntriesFrom(args.fromIndex)
       .filter((entry) => entry.index <= this.commitIndex);
@@ -587,15 +734,20 @@ export class RaftNode {
           const nextIdx = this.nextIndex.get(peer) ?? entry.index;
           if (nextIdx > entry.index) return { peer, success: true };
 
+          if (nextIdx <= this.log.getLastIncludedIndex()) {
+            await this.sendInstallSnapshot(peer);
+            return { peer, success: false };
+          }
+
           const prevLogIndex = nextIdx - 1;
-          const prevEntry = this.log.getEntry(prevLogIndex);
+          const prevLogTerm = this.log.getTermAt(prevLogIndex);
           const entries = this.log.getEntriesFrom(nextIdx);
 
           const args: AppendEntriesArgs = {
             term: this.currentTerm,
             leaderId: this.replicaId,
             prevLogIndex,
-            prevLogTerm: prevEntry?.term ?? 0,
+            prevLogTerm,
             entries,
             leaderCommit: this.commitIndex,
           };
@@ -668,9 +820,18 @@ export class RaftNode {
           this.becomeFollower(result.term);
         }
 
+        // Leader's log start has outrun the entries we asked for — install its snapshot before
+        // (or instead of) applying any entries this response carries.
+        if (result.snapshot && result.snapshot.lastIncludedIndex > this.commitIndex) {
+          this.applySnapshot(result.snapshot.lastIncludedIndex, result.snapshot.lastIncludedTerm, result.snapshot.boards);
+          log('info', 'catch_up_installed_snapshot', { lastIncludedIndex: result.snapshot.lastIncludedIndex });
+        }
+
+        const lastIncluded = this.log.getLastIncludedIndex();
         const committedEntries = result.entries.filter((entry) => entry.index <= result.commitIndex);
 
         for (const entry of committedEntries) {
+          if (entry.index <= lastIncluded) continue; // already covered by the snapshot just installed
           const existing = this.log.getEntry(entry.index);
           if (existing && existing.term !== entry.term) {
             if (entry.index <= this.commitIndex) {
