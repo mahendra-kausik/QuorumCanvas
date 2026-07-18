@@ -25,8 +25,11 @@ The project is designed for demos of leader failover, replica catch-up, and netw
 ```text
 Mini-Raft/
 ├── README.md
-├── Documentation.md
-├── CHANGELOG.md
+├── CLAUDE.md          # Build protocol / operating contract
+├── PROJECT_PLAN.md    # Layered upgrade plan + acceptance gates
+├── DECISIONS.md       # Decision log
+├── PROGRESS.md        # Session state
+├── Documentation.md   # Deep architecture & protocol notes
 ├── docker-compose.yml
 ├── frontend/          # React + Vite client
 ├── gateway/           # Node WebSocket + HTTP gateway
@@ -236,4 +239,5 @@ docker compose restart gateway
 ## Additional Documentation
 
 - Deep architecture and protocol notes: `Documentation.md`
-- Chronological change history: `CHANGELOG.md`
+- Upgrade plan and build layers: `PROJECT_PLAN.md`
+- Design decisions and rationale: `DECISIONS.md`
