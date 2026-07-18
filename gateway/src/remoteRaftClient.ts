@@ -1,10 +1,12 @@
 import type { Stroke } from './types.js';
 import type { RaftClient } from './raftClient.js';
 
-const RPC_TIMEOUT = 3000;
-const MAX_WRITE_ATTEMPTS = 5;
-const WRITE_RETRY_BASE_DELAY = 120;
-const WRITE_RETRY_MAX_DELAY = 1200;
+import { GATEWAY_TIMING } from './config.js';
+
+const RPC_TIMEOUT = GATEWAY_TIMING.rpcTimeoutMs;
+const MAX_WRITE_ATTEMPTS = GATEWAY_TIMING.maxWriteAttempts;
+const WRITE_RETRY_BASE_DELAY = GATEWAY_TIMING.writeRetryBaseDelayMs;
+const WRITE_RETRY_MAX_DELAY = GATEWAY_TIMING.writeRetryMaxDelayMs;
 
 export class RemoteRaftClient implements RaftClient {
   private currentLeader: string | null = null;

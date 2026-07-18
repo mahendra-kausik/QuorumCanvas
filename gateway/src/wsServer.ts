@@ -6,6 +6,7 @@ import { BoardManager } from './boardManager.js';
 import { MessageHandler } from './messageHandler.js';
 import { LocalRaftClient } from './raftClient.js';
 import { RemoteRaftClient } from './remoteRaftClient.js';
+import { parseGatewayConfig } from './config.js';
 
 export interface ConnectionInfo {
   boardId: string;
@@ -14,15 +15,14 @@ export interface ConnectionInfo {
 
 export function createWsServer(server: Server) {
   const boardManager = new BoardManager();
-  const maxUsersPerBoard = parseInt(process.env.MAX_USERS_PER_BOARD ?? '50', 10);
+  const { raftPeers, maxUsersPerBoard } = parseGatewayConfig(process.env);
 
-  const raftPeers = process.env.RAFT_PEERS;
-  const raftClient = raftPeers
-    ? new RemoteRaftClient(raftPeers.split(',').map((p) => p.trim()))
+  const raftClient = raftPeers.length > 0
+    ? new RemoteRaftClient(raftPeers)
     : new LocalRaftClient(boardManager);
 
-  if (raftPeers) {
-    console.log(`[gateway] Using RemoteRaftClient with peers: ${raftPeers}`);
+  if (raftPeers.length > 0) {
+    console.log(`[gateway] Using RemoteRaftClient with peers: ${raftPeers.join(',')}`);
   } else {
     console.log('[gateway] Using LocalRaftClient (no RAFT_PEERS set)');
   }

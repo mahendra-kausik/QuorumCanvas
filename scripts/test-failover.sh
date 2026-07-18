@@ -19,14 +19,14 @@ LOG_ROOT="logs"
 RUN_ID=$(date +"%Y%m%d-%H%M%S")
 RUN_DIR="${LOG_ROOT}/failover-${RUN_ID}"
 mkdir -p "$RUN_DIR"
-REPLICA_PORTS=(3001 3002 3003 3004)
+REPLICA_PORTS=(3001 3002 3003)
 CURL_MAX_TIME=2
 
 write_snapshot() {
   local name="$1"
   {
     echo "=== ${name} @ $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
-    for port in 3001 3002 3003 3004; do
+    for port in 3001 3002 3003; do
       echo "port ${port}:"
       curl -s --max-time "$CURL_MAX_TIME" "http://localhost:${port}/status" 2>/dev/null || echo '{"error":"unreachable"}'
       echo ""
@@ -35,7 +35,7 @@ write_snapshot() {
 }
 
 capture_compose_logs() {
-  docker compose logs gateway replica1 replica2 replica3 replica4 > "${RUN_DIR}/docker-compose.log" 2>&1 || true
+  docker compose logs gateway replica1 replica2 replica3 > "${RUN_DIR}/docker-compose.log" 2>&1 || true
 }
 
 wait_for_leader() {

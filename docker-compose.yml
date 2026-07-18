@@ -12,7 +12,7 @@ services:
     environment:
       REPLICA_ID: "replica1"
       PORT: "3001"
-      PEERS: "http://replica2:3002,http://replica3:3003,http://replica4:3004"
+      PEERS: "http://replica2:3002,http://replica3:3003"
     networks:
       - raft-net
     healthcheck:
@@ -36,7 +36,7 @@ services:
     environment:
       REPLICA_ID: "replica2"
       PORT: "3002"
-      PEERS: "http://replica1:3001,http://replica3:3003,http://replica4:3004"
+      PEERS: "http://replica1:3001,http://replica3:3003"
     networks:
       - raft-net
     depends_on:
@@ -63,7 +63,7 @@ services:
     environment:
       REPLICA_ID: "replica3"
       PORT: "3003"
-      PEERS: "http://replica1:3001,http://replica2:3002,http://replica4:3004"
+      PEERS: "http://replica1:3001,http://replica2:3002"
     networks:
       - raft-net
     depends_on:
@@ -73,37 +73,6 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3003/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 10s
-    restart: unless-stopped
-
-  replica4:
-    build: ./replica
-    command: npm run dev
-    ports:
-      - "3004:3004"
-      - "9234:9234"
-    volumes:
-      - ./replica:/app
-      - /app/node_modules
-      - ./replica4:/app/instance
-    environment:
-      REPLICA_ID: "replica4"
-      PORT: "3004"
-      PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
-    networks:
-      - raft-net
-    depends_on:
-      replica1:
-        condition: service_healthy
-      replica2:
-        condition: service_healthy
-      replica3:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3004/health"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -121,7 +90,7 @@ services:
       - /app/node_modules
     environment:
       PORT: "8080"
-      RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003,http://replica4:3004"
+      RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
     networks:
       - raft-net
     depends_on:
@@ -130,8 +99,6 @@ services:
       replica2:
         condition: service_healthy
       replica3:
-        condition: service_healthy
-      replica4:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]

@@ -3,19 +3,27 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-18:** Governance layer established. Created `CLAUDE.md`, `PROJECT_PLAN.md`,
-  `DECISIONS.md`, `PROGRESS.md`. Completed a full correctness audit of the Raft core
-  (`replica/src/raftNode.ts`, `raftLog.ts`, `rpcHandlers.ts`, `index.ts`,
-  `gateway/src/remoteRaftClient.ts`).
-- Key audit result: **election restriction and current-term commit rule are already correct**
-  (see DECISIONS D02) — they are interview assets, not work items.
+- **2026-07-18 — Layer 0 (Baseline & cleanup) COMPLETE.** Gate passed (evidence below).
+  - Cluster 4→3 replicas: `docker-compose.yml`, peer lists, gateway `RAFT_PEERS`, deleted
+    `replica4/`; updated README, Documentation.md, and both demo scripts (no `replica4`/`3004` refs left).
+  - Removed placeholder `replica{1..4}/README.md`; gitignored `replica1..3/` instance dirs (D10).
+  - Added per-service config modules `replica/src/config.ts` (`RAFT_TIMING` + `parseConfig`) and
+    `gateway/src/config.ts` (`GATEWAY_TIMING` + `parseGatewayConfig`); rewired electionTimer,
+    rpcClient, index, wsServer, remoteRaftClient to source all tunables there (D08).
+  - Pinned every dependency to exact lockfile-resolved versions across all 3 services (D09);
+    lockfiles synced; `npm ci` succeeds in each (proves lock-consistency).
+  - Governance docs committed earlier; repo remote repointed to `QuorumCanvas`.
+  - **Gate evidence:** `tsc --noEmit` clean (replica+gateway); `npm test` green — replica **81/81**,
+    gateway **41/41**, frontend **41/41**; `docker compose up` → all 5 containers **healthy**;
+    e2e: leader elected (replica1, term 3), stroke broadcast to a second WS client and
+    committed+replicated to follower replica2 (**RESULT: PASS**).
+- Prior: Governance layer + full Raft correctness audit (election restriction & current-term
+  commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 0 — Baseline & cleanup** (awaiting approval to start per CLAUDE.md PRIME DIRECTIVE):
-  remove dead files, move 4→3 replicas, TS strict, pin deps, add per-service config module.
-  Gate: 3-node compose healthy + all tests green + end-to-end stroke commits.
-- Then **Layer 1 — Durable persistence** (the critical fix): hand-rolled WAL + fsynced
-  `state.json`, reload/replay on boot. Gate: crash-recovery + no-double-vote-across-restart tests.
+- **Layer 1 — Durable persistence** (the critical fix, awaiting approval per PRIME DIRECTIVE):
+  hand-rolled WAL + fsynced `state.json`, reload/replay on boot, new `DATA_DIR` on the
+  gitignored instance dirs. Gate: crash-recovery + no-double-vote-across-restart tests (D05).
 
 ## Prioritized defect backlog (from the audit)
 1. **[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →

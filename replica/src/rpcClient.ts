@@ -10,7 +10,9 @@ import type {
   SyncLogResult,
 } from './types.js';
 
-const RPC_TIMEOUT = 2000;
+import { RAFT_TIMING } from './config.js';
+
+const RPC_TIMEOUT = RAFT_TIMING.rpcTimeoutMs;
 
 export class HttpRpcClient implements RpcClient {
   private async post<T>(url: string, body: unknown): Promise<T> {

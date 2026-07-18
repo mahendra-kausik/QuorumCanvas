@@ -3,3 +3,9 @@ dist
 *.log
 .DS_Store
 logs
+
+# Per-replica instance/data dirs are runtime state (Docker bind-mount targets,
+# future L1 WAL/snapshot storage) — created on `docker compose up`, never source.
+replica1/
+replica2/
+replica3/

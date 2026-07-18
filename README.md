@@ -17,7 +17,7 @@ The project is designed for demos of leader failover, replica catch-up, and netw
 - Follower catch-up after restart
 - Undo/redo implemented as compensation entries in the replicated log
 - Dashboard for live replica health and RAFT status
-- Docker hot-reload dev stack with 4 replicas
+- Docker hot-reload dev stack with 3 replicas
 - Demo scripts that capture logs and snapshots automatically
 
 ## Repository Layout
@@ -34,10 +34,7 @@ Mini-Raft/
 ├── frontend/          # React + Vite client
 ├── gateway/           # Node WebSocket + HTTP gateway
 ├── replica/           # RAFT node implementation
-├── replica1/          # Bind-mount folder (compose)
-├── replica2/          # Bind-mount folder (compose)
-├── replica3/          # Bind-mount folder (compose)
-├── replica4/          # Bind-mount folder (compose)
+├── replica1..3/       # Per-node instance dirs (compose bind mounts; gitignored, auto-created)
 ├── scripts/           # Failover and partition demo scripts
 ├── tests/             # Service-level test suites
 └── logs/              # Script-generated artifacts
@@ -63,7 +60,6 @@ Read/join flow:
 - Replica1: `http://localhost:3001`
 - Replica2: `http://localhost:3002`
 - Replica3: `http://localhost:3003`
-- Replica4: `http://localhost:3004`
 
 ## Prerequisites
 
@@ -103,20 +99,17 @@ From `replica/`:
 npm install
 ```
 
-Run 4 nodes:
+Run 3 nodes:
 
 ```bash
 # replica1
-REPLICA_ID=replica1 PORT=3001 PEERS="http://localhost:3002,http://localhost:3003,http://localhost:3004" npm run dev
+REPLICA_ID=replica1 PORT=3001 PEERS="http://localhost:3002,http://localhost:3003" npm run dev
 
 # replica2
-REPLICA_ID=replica2 PORT=3002 PEERS="http://localhost:3001,http://localhost:3003,http://localhost:3004" npm run dev
+REPLICA_ID=replica2 PORT=3002 PEERS="http://localhost:3001,http://localhost:3003" npm run dev
 
 # replica3
-REPLICA_ID=replica3 PORT=3003 PEERS="http://localhost:3001,http://localhost:3002,http://localhost:3004" npm run dev
-
-# replica4
-REPLICA_ID=replica4 PORT=3004 PEERS="http://localhost:3001,http://localhost:3002,http://localhost:3003" npm run dev
+REPLICA_ID=replica3 PORT=3003 PEERS="http://localhost:3001,http://localhost:3002" npm run dev
 ```
 
 ### 2) Gateway
@@ -125,7 +118,7 @@ From `gateway/`:
 
 ```bash
 npm install
-RAFT_PEERS="http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:3004" npm run dev
+RAFT_PEERS="http://localhost:3001,http://localhost:3002,http://localhost:3003" npm run dev
 ```
 
 ### 3) Frontend
@@ -223,7 +216,7 @@ docker compose up --build -d
 docker compose logs -f gateway
 
 # Follow all replica logs
-docker compose logs -f replica1 replica2 replica3 replica4
+docker compose logs -f replica1 replica2 replica3
 
 # Restart only gateway
 docker compose restart gateway

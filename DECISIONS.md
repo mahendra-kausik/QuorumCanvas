@@ -18,6 +18,30 @@
 
 ---
 
+### D10 — Per-replica instance dirs are gitignored runtime state, not source (L0)
+- Date: 2026-07-18
+- Context: `replica1..4/` each held only a placeholder `README.md` whose sole purpose was to keep the (otherwise empty) Docker bind-mount source dir tracked in git.
+- Decision: Delete the placeholder READMEs and gitignore `replica1..3/`; let `docker compose up` create the bind-mount source dirs on the host.
+- Why: These dirs are runtime state (and become the L1 WAL/snapshot `DATA_DIR`), not source. Docker auto-creates a missing bind-mount source, so nothing needs to be committed. Removes doc noise the plan flagged.
+- Alternatives considered: Replace each README with a `.gitkeep` (still a committed placeholder — same noise); leave as-is (noise + will be overwritten by L1 data anyway).
+- Tradeoffs / risks: A fresh clone has no `replica*/` dirs until first `compose up`; acceptable since Docker creates them.
+
+### D09 — Dependency versions pinned exactly to lockfile-resolved versions (L0)
+- Date: 2026-07-18
+- Context: CLAUDE.md §4 and the L0 gate require reproducible builds; package.json used caret/tilde ranges that let installs drift.
+- Decision: Pin every dependency in all three services to the exact version currently resolved in its `package-lock.json` (e.g. `express ^4.21.0` → `4.22.1`), and keep the committed lockfiles as the primary reproducibility mechanism (`npm ci`).
+- Why: Exact pins + committed lockfiles make `npm ci` byte-identical across machines and over time, which benchmarks (L8) depend on. Pinning to the *resolved* version (not the old floor) keeps package.json and lock in sync so `npm ci` doesn't error.
+- Alternatives considered: Keep ranges and rely on the lockfile alone (works for `npm ci` but `npm install` can silently bump); pin to the old floor version (would desync from lock → `npm ci` failure).
+- Tradeoffs / risks: Security/patch updates now require a deliberate bump; acceptable and arguably desirable for a defensible, reproducible project.
+
+### D08 — One config module per service for all tunables (L0)
+- Date: 2026-07-18
+- Context: Raft timing (election timeout, heartbeat, skew), RPC timeouts, and retry knobs were scattered as magic numbers across `electionTimer.ts`, `rpcClient.ts`, `remoteRaftClient.ts`, and inline `process.env` reads.
+- Decision: Add `config.ts` per service (`replica/src/config.ts`, `gateway/src/config.ts`). Env-derived identity/config is parsed by `parseConfig`/`parseGatewayConfig`; fixed tunables live in exported `RAFT_TIMING` / `GATEWAY_TIMING` const objects that the modules import.
+- Why: CLAUDE.md §6 — a single source of truth per service makes tuning and benchmark ablations (L8) trivial and every value defensible in an interview. Keeping timing as consts (not env) avoids threading config through constructors and keeps the existing test seams intact (parseConfig still returns exactly `{id,port,peers}`).
+- Alternatives considered: Make every knob env-overridable now (more plumbing + would break the parseConfig deep-equal test — YAGNI until benchmarks need it); leave magic numbers in place (fails §6, hard to tune).
+- Tradeoffs / risks: Timing changes still require a code edit + redeploy rather than an env flip; env-overridability can be added in the layer that needs it (L8).
+
 ### D07 — Governance layer adapted from docsGPT-Agent CLAUDE.md
 - Date: 2026-07-18
 - Context: Turning Mini-RAFT from lab demo into a deployed, defensible portfolio project needs a repeatable, resume-oriented build process, not ad-hoc edits.

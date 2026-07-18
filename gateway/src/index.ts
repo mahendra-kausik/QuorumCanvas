@@ -1,12 +1,9 @@
 import { createServer } from 'http';
 import { createWsServer } from './wsServer.js';
 import { collectClusterStatus } from './clusterStatus.js';
+import { parseGatewayConfig } from './config.js';
 
-const PORT = parseInt(process.env.PORT ?? '8080', 10);
-const raftPeers = (process.env.RAFT_PEERS ?? '')
-  .split(',')
-  .map((peer) => peer.trim())
-  .filter((peer) => peer.length > 0);
+const { port: PORT, raftPeers } = parseGatewayConfig(process.env);
 
 function writeCors(res: import('http').ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');

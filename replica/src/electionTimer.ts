@@ -1,8 +1,8 @@
 import type { TimerManager } from './types.js';
+import { RAFT_TIMING } from './config.js';
 
-const ELECTION_TIMEOUT_MIN = 500;
-const ELECTION_TIMEOUT_MAX = 800;
-const HEARTBEAT_INTERVAL = 150;
+const { electionTimeoutMinMs, electionTimeoutMaxMs, heartbeatIntervalMs, electionSkewStepMs } =
+  RAFT_TIMING;
 
 interface TimerManagerOptions {
   replicaId?: string;
@@ -28,13 +28,14 @@ export class DefaultTimerManager implements TimerManager {
       return 0;
     }
 
-    // Replica-specific skew reduces repeated split votes when all nodes restart together.
-    // A larger skew is intentional for 4-node local clusters where clocks are highly aligned.
-    return replicaNumber * 300;
+    // Replica-specific skew reduces repeated split votes when all nodes restart together
+    // with tightly aligned clocks (3-node local cluster).
+    return replicaNumber * electionSkewStepMs;
   }
 
   private randomTimeout(): number {
-    const base = ELECTION_TIMEOUT_MIN + Math.floor(Math.random() * (ELECTION_TIMEOUT_MAX - ELECTION_TIMEOUT_MIN + 1));
+    const base =
+      electionTimeoutMinMs + Math.floor(Math.random() * (electionTimeoutMaxMs - electionTimeoutMinMs + 1));
     return base + this.electionSkewMs;
   }
 
@@ -64,7 +65,7 @@ export class DefaultTimerManager implements TimerManager {
 
   startHeartbeat(callback: () => void): void {
     this.stopHeartbeat();
-    this.heartbeatTimer = setInterval(callback, HEARTBEAT_INTERVAL);
+    this.heartbeatTimer = setInterval(callback, heartbeatIntervalMs);
   }
 
   stopHeartbeat(): void {

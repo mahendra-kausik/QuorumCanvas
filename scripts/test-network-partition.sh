@@ -24,7 +24,6 @@ service_port() {
     replica1) echo 3001 ;;
     replica2) echo 3002 ;;
     replica3) echo 3003 ;;
-    replica4) echo 3004 ;;
     *) echo "" ;;
   esac
 }
@@ -33,7 +32,7 @@ write_snapshot() {
   local name="$1"
   {
     echo "=== ${name} @ $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
-    for port in 3001 3002 3003 3004; do
+    for port in 3001 3002 3003; do
       echo "port ${port}:"
       curl -s --max-time "$CURL_MAX_TIME" "http://localhost:${port}/status" 2>/dev/null || echo '{"error":"unreachable"}'
       echo ""
@@ -45,7 +44,7 @@ wait_for_leader() {
   local timeout=${1:-12}
   local elapsed=0
   while [ $elapsed -lt $timeout ]; do
-    for port in 3001 3002 3003 3004; do
+    for port in 3001 3002 3003; do
       local status
       status=$(curl -s --max-time "$CURL_MAX_TIME" "http://localhost:${port}/status" 2>/dev/null || echo '{}')
       local state
@@ -77,7 +76,7 @@ echo "  Mini-RAFT Network Partition Demo"
 echo "========================================"
 
 info "Checking replica health endpoints"
-for port in 3001 3002 3003 3004; do
+for port in 3001 3002 3003; do
   if ! curl -s --max-time "$CURL_MAX_TIME" "http://localhost:${port}/health" > /dev/null 2>&1; then
     fail "Replica on port $port is not running. Run: docker compose up --build -d"
   fi
@@ -94,11 +93,8 @@ write_snapshot "before-partition"
 network_name=$(get_network_name)
 info "Detected network: ${network_name}"
 
-# Prefer isolating replica4 if present, else isolate the current leader.
-isolate_service="replica4"
-if [ -z "$(docker compose ps -q replica4 2>/dev/null || true)" ]; then
-  isolate_service="$leader_id"
-fi
+# Isolate the current leader: the majority (2 of 3) must re-elect and keep committing.
+isolate_service="$leader_id"
 
 container_id=$(docker compose ps -q "$isolate_service" 2>/dev/null || true)
 if [ -z "$container_id" ]; then
@@ -161,7 +157,7 @@ else
   fail "${isolate_service} did not catch up within ${max_catchup_wait}s"
 fi
 
-docker compose logs gateway replica1 replica2 replica3 replica4 > "${RUN_DIR}/docker-compose.log" 2>&1 || true
+docker compose logs gateway replica1 replica2 replica3 > "${RUN_DIR}/docker-compose.log" 2>&1 || true
 
 echo "========================================"
 echo -e "  ${GREEN}Network partition demo complete${NC}"

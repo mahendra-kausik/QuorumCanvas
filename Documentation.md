@@ -75,7 +75,8 @@ stateDiagram-v2
   - `POST /append-entries`
   - `POST /client-write`
 - Configuration:
-  - Majority dynamically computed from peer count (works for 3 or 4 replicas).
+  - Majority dynamically computed from live peer count (cluster runs 3 replicas; the math
+    is not hard-coded to a fixed size).
 
 ### Catch-Up And Sync Protocol
 - What it does:
@@ -163,10 +164,10 @@ stateDiagram-v2
 
 ## Docker Deployment And Hot Reload
 - What it does:
-  - Runs 1 gateway + 4 replicas + frontend with bind mounts and service health ordering.
+  - Runs 1 gateway + 3 replicas + frontend with bind mounts and service health ordering.
 - How it works:
   - Services run in dev watch mode (`tsx watch` / Vite dev).
-  - Replica wrapper folders (`replica1/`, `replica2/`, `replica3/`, `replica4/`) are mounted.
+  - Per-node instance folders (`replica1/`, `replica2/`, `replica3/`) are bind-mounted.
   - Healthchecks gate startup via `depends_on: condition: service_healthy`.
   - Debug ports are exposed for troubleshooting.
 - API endpoints:
