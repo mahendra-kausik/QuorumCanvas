@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, type ReplicaConfig } from '../../replica/src/index.js';
+import type { RaftNode } from '../../replica/src/raftNode.js';
 import type { RpcClient, TimerManager } from '../../replica/src/types.js';
 import { createServer, type Server } from 'http';
 
@@ -7,7 +8,9 @@ function mockRpc(): RpcClient {
   return {
     requestVote: vi.fn(),
     appendEntries: vi.fn(),
-    sendHeartbeat: vi.fn(),
+    // Default to a confirming ack so ReadIndex (L3) doesn't hang tests that don't care about
+    // heartbeat behavior; tests that do care override with mockResolvedValueOnce/mockResolvedValue.
+    sendHeartbeat: vi.fn().mockResolvedValue({ term: 0, success: true, responderId: 'peer' }),
     syncLog: vi.fn(),
   };
 }
@@ -38,11 +41,13 @@ async function request(server: Server, method: string, path: string, body?: unkn
 describe('RPC Handlers', () => {
   let server: Server;
   let rpc: RpcClient;
+  let raftNode: RaftNode;
 
   beforeEach(async () => {
     rpc = mockRpc();
-    const { app } = createApp(config, { rpcClient: rpc, timerManager: mockTimers() });
-    server = createServer(app);
+    const created = createApp(config, { rpcClient: rpc, timerManager: mockTimers() });
+    raftNode = created.raftNode;
+    server = createServer(created.app);
     await new Promise<void>((resolve) => server.listen(0, resolve));
   });
 
@@ -99,7 +104,14 @@ describe('RPC Handlers', () => {
     expect(res.body.state).toBe('follower');
   });
 
-  it('GET /board-state returns strokes', async () => {
+  it('GET /board-state returns 421 + leaderHint when not leader (ReadIndex, L3)', async () => {
+    const res = await request(server, 'GET', '/board-state?boardId=b1');
+    expect(res.status).toBe(421);
+  });
+
+  it('GET /board-state returns strokes once ReadIndex-confirmed leader', async () => {
+    raftNode.becomeCandidate();
+    raftNode.becomeLeader(); // mockRpc's sendHeartbeat defaults to a confirming ack
     const res = await request(server, 'GET', '/board-state?boardId=b1');
     expect(res.status).toBe(200);
     expect(res.body.boardId).toBe('b1');

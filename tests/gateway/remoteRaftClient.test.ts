@@ -118,4 +118,28 @@ describe('RemoteRaftClient', () => {
     const strokes = await client.getStrokes('b1');
     expect(strokes).toEqual([]);
   });
+
+  it('getStrokes follows a 421 leaderHint (explicit URL) to the real leader', async () => {
+    const stroke = makeStroke();
+    // The real leader — ReadIndex-confirms and answers 200.
+    const { server: leaderServer, url: leaderUrl } = await createMockReplica((req) => {
+      if (req.url?.startsWith('/board-state')) {
+        return { status: 200, body: { boardId: 'b1', strokes: [stroke] } };
+      }
+      return { status: 404, body: {} };
+    });
+    servers.push(leaderServer);
+
+    // A non-leader (or unconfirmed) replica — 421 + explicit URL hint, not a name.
+    const { server: hintServer, url: hintUrl } = await createMockReplica(() => ({
+      status: 421,
+      body: { leaderHint: leaderUrl },
+    }));
+    servers.push(hintServer);
+
+    const client = new RemoteRaftClient([hintUrl, leaderUrl]);
+    const strokes = await client.getStrokes('b1');
+    expect(strokes).toHaveLength(1);
+    expect(strokes[0].id).toBe('s1');
+  });
 });

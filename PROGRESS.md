@@ -3,7 +3,51 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-18 — Layer 2 (Snapshot & log compaction) COMPLETE.** Gate passed (evidence below).
+- **2026-07-19 — Layer 3 (Correct reads + explicit leader redirect) COMPLETE.** Gate passed
+  (evidence below).
+  - **ReadIndex** (D13): new `RaftNode.confirmLeadership()` sends the existing `/heartbeat` RPC
+    to all peers and requires a majority of same-term acks (self + peers) before a read is
+    trusted; any higher-term reply steps the node down. New `RaftNode.readBoardState(boardId)`
+    records `commitIndex`, calls `confirmLeadership()`, and only then returns
+    `getStrokes(boardId)` — `applyCommitted()` already runs synchronously on every commit
+    advance so `lastApplied` is caught up by the time the heartbeat round resolves, no wait loop
+    needed. `GET /board-state` (`rpcHandlers.ts`) is now `async`; on refusal (not leader, or
+    unconfirmed) it replies **421 Misdirected Request** + `{ leaderHint }`, distinct from a
+    confirmed-empty board (200, `strokes: []`). Known, documented (not fixed) bound: a
+    freshly-elected leader's `commitIndex` can briefly lag the true committed index until its
+    first current-term commit — never wrong data, never a stale-from-superseded-leader read,
+    self-closing within the next write; no-op-on-election is the named upgrade path.
+  - **Explicit leader address** (D14): new `RaftNode.leaderAddr` (URL) tracked alongside the
+    existing `leaderId` (name, kept for `/status`/logs/dashboard). Sourced from a new
+    `advertisedUrl` config field / `ADVERTISED_URL` env (default `http://${replicaId}:${port}`,
+    already matches docker-compose's peer-URL convention — no compose changes needed).
+    `AppendEntriesArgs`/`HeartbeatArgs` carry an optional `leaderAddr` the leader stamps on every
+    RPC; followers copy it. `handleClientWrite`'s not-leader reply, `readBoardState`'s refusal,
+    and `requestCatchUp`'s target selection now use `leaderAddr` directly — the old
+    `peers.find(p => p.includes(leaderId))` substring match is gone. Gateway
+    `remoteRaftClient.ts`: `submitStroke`'s hint-follow uses the URL directly (no `.find`);
+    `getStrokes` gained `tryGetStrokes`/`getRaw` to distinguish 200 (confirmed) from 421
+    (follow `leaderHint` one hop, then fall through to the next peer).
+  - **Gate evidence:** `tsc --noEmit` clean (replica + gateway). `npm test` green — replica
+    **98/98** (93 prior + 5 new in `tests/replica/readIndex.test.ts`: confirmed-leader read,
+    minority-partitioned-leader refusal **[the property this layer exists to add]**,
+    higher-term-ack step-down, follower redirect carries the URL not a name), gateway **42/42**
+    (41 prior + 1 new: `getStrokes` follows a 421 `leaderHint` URL to the real leader), frontend
+    **41/41** unaffected. Two pre-existing tests updated for the new behavior/shape
+    (`health.test.ts` `parseConfig` shape, `raftNode.test.ts` leaderHint-is-now-a-URL,
+    `integration.test.ts` catch-up test sets `leaderAddr` not `leaderId`). Docker e2e
+    (`docker compose up`, 3 replicas + gateway all healthy): wrote a stroke directly to the
+    leader (replica1) — `GET /board-state` on replica1 returned **200** with the stroke;
+    the same request on a follower (replica2) returned **421** `{"leaderHint":
+    "http://replica1:3001"}` — an explicit URL, not a name. `docker network disconnect` fully
+    partitioned replica1 (old leader) from the cluster and from the host; replica2 won a new
+    election (term 4) and served the committed write. Queried replica1 from *inside its own
+    container* (loopback, so its own local state was reachable) while still partitioned:
+    `GET /board-state` returned **421 Misdirected Request** — the partitioned leader refused to
+    serve its stale-authoritative view, confirming ReadIndex's majority-heartbeat check failed
+    as designed. Reconnected replica1 — it rejoined, won re-election (term 5), and all 3
+    replicas converged on `commitIndex=1` with no data lost (**RESULT: PASS**).
+- Prior: Layer 2 (Snapshot & log compaction) COMPLETE.
   - `replica/src/raftLog.ts` reworked to be offset-addressed: `lastIncludedIndex`/
     `lastIncludedTerm` seeded from a loaded snapshot; `getEntry`/`getLastIndex`/
     `getEntriesFrom`/`truncateFrom` all offset-adjusted; new `getTermAt` (term at an index
@@ -78,20 +122,22 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 3 — Correct reads + explicit leader redirect** (awaiting approval per PRIME
-  DIRECTIVE): ReadIndex (or leader lease) so `/board-state` can't serve stale committed state
-  from a minority-partitioned leader; replace the `leaderId` substring-match redirect
-  (`remoteRaftClient.ts:39`) with an explicit address.
+- **Layer 4 — Backpressure & single replication driver** (awaiting approval per PRIME
+  DIRECTIVE): cap entries per AppendEntries (batch size); one replication driver per peer with
+  an in-flight guard so the 150 ms heartbeat and a concurrent `handleClientWrite` can't both
+  mutate `nextIndex`/`matchIndex` and double-send.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
    split-brain / lost commits.~~ → **FIXED in L1** (D11).
 2. ~~**[HIGH]** No snapshot / log compaction — unbounded log, full replay on restart.~~ →
    **FIXED in L2** (D12).
-3. **[HIGH]** Stale reads on minority-partition leader (no ReadIndex/lease). → **L3**
+3. ~~**[HIGH]** Stale reads on minority-partition leader (no ReadIndex/lease).~~ → **FIXED in
+   L3** (D13).
 4. **[MED]** Unbounded AppendEntries payload (no batch cap / backpressure). → **L4**
 5. **[MED]** `nextIndex`/`matchIndex` race between heartbeat timer and `handleClientWrite`. → **L4**
-6. **[LOW]** Leader hint is a name matched by `url.includes()` — fragile. → **L3**
+6. ~~**[LOW]** Leader hint is a name matched by `url.includes()` — fragile.~~ → **FIXED in L3**
+   (D14).
 7. **[LOW]** 4 replicas (even quorum) — move to 3. → **L0**
 
 Non-Raft hardening tracked in later layers: observability/metrics + graceful shutdown (**L5**),

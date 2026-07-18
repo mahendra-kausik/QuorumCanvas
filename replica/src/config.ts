@@ -10,6 +10,10 @@ export interface ReplicaConfig {
   dataDir?: string;
   // Override RAFT_TIMING.snapshotThresholdEntries (L2). Unset → use the default.
   snapshotThresholdEntries?: number;
+  // Explicit URL peers/gateway should use to reach this node as leader (L3) — replaces the
+  // fragile replicaId-substring redirect. Unset → RaftNode falls back to a same-container
+  // hostname guess; set ADVERTISED_URL explicitly for any other deploy topology.
+  advertisedUrl?: string;
 }
 
 export function parseConfig(env: Record<string, string | undefined>): ReplicaConfig {
@@ -28,7 +32,9 @@ export function parseConfig(env: Record<string, string | undefined>): ReplicaCon
     ? parseInt(env.SNAPSHOT_THRESHOLD, 10)
     : undefined;
 
-  return { replicaId, port, peers, dataDir, snapshotThresholdEntries };
+  const advertisedUrl = env.ADVERTISED_URL || `http://${replicaId}:${port}`;
+
+  return { replicaId, port, peers, dataDir, snapshotThresholdEntries, advertisedUrl };
 }
 
 // Raft timing, milliseconds. The election-timeout window must sit well above the heartbeat

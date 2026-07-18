@@ -205,7 +205,7 @@ describe('RAFT Integration', () => {
     replicas[followerIdx] = restarted;
 
     // Catch up from leader
-    restarted.node.leaderId = leader.url;
+    restarted.node.leaderAddr = leader.url;
     await restarted.node.requestCatchUp();
 
     expect(restarted.node.log.getLength()).toBe(5);

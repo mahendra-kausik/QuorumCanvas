@@ -33,6 +33,9 @@ describe('parseConfig', () => {
       replicaId: 'replica1',
       port: 3001,
       peers: ['http://replica2:3002', 'http://replica3:3003'],
+      dataDir: undefined,
+      snapshotThresholdEntries: undefined,
+      advertisedUrl: 'http://replica1:3001',
     });
   });
 

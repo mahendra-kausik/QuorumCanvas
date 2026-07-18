@@ -388,9 +388,9 @@ describe('RaftNode', () => {
     });
 
     it('returns leaderHint if known', async () => {
-      node.leaderId = 'node-2';
+      node.leaderAddr = 'http://node-2:3002';
       const result = await node.handleClientWrite(makeStroke());
-      expect(result.leaderHint).toBe('node-2');
+      expect(result.leaderHint).toBe('http://node-2:3002');
     });
 
     it('commits write when majority acks', async () => {

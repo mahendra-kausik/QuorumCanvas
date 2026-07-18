@@ -38,13 +38,21 @@ export function createRpcRouter(raftNode: RaftNode): Router {
     res.json(raftNode.getStatus());
   });
 
-  router.get('/board-state', (req, res) => {
+  router.get('/board-state', async (req, res) => {
     const boardId = req.query.boardId as string;
     if (!boardId) {
       res.status(400).json({ error: 'boardId query parameter required' });
       return;
     }
-    res.json({ boardId, strokes: raftNode.getStrokes(boardId) });
+    // ReadIndex-confirmed (L3): only a leader that just proved (via majority heartbeat) it
+    // hasn't been superseded may answer. 421 (Misdirected Request) signals "not authoritative,
+    // try leaderHint" — distinct from a confirmed-empty board (200, strokes: []).
+    const result = await raftNode.readBoardState(boardId);
+    if (!result.success) {
+      res.status(421).json({ leaderHint: result.leaderHint });
+      return;
+    }
+    res.json({ boardId, strokes: result.strokes });
   });
 
   return router;

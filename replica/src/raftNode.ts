@@ -19,6 +19,7 @@ import {
   type LogEntry,
   type Stroke,
   type ClientWriteResult,
+  type ReadBoardStateResult,
   type ReplicaStatus,
 } from './types.js';
 
@@ -32,6 +33,9 @@ export class RaftNode {
   // Volatile state
   state: NodeState = NodeState.Follower;
   leaderId: string | null = null;
+  // Explicit routing address for the current leader (L3) — set alongside leaderId wherever
+  // that is, but used for redirects/catch-up instead of substring-matching leaderId.
+  leaderAddr: string | null = null;
   commitIndex = 0;
   lastApplied = 0;
 
@@ -51,6 +55,8 @@ export class RaftNode {
     private timerManager: TimerManager,
     private persistence: Persistence = new MemoryPersistence(),
     private snapshotThreshold: number = RAFT_TIMING.snapshotThresholdEntries,
+    // This node's own routing address, advertised as leaderAddr once it becomes leader (L3).
+    private selfUrl: string = replicaId,
   ) {
     this.log = new RaftLog(persistence);
 
@@ -98,12 +104,13 @@ export class RaftNode {
 
   // --- State transitions ---
 
-  becomeFollower(term: number, leaderId?: string): void {
+  becomeFollower(term: number, leaderId?: string, leaderAddr?: string): void {
     const wasLeader = this.state === NodeState.Leader;
     this.state = NodeState.Follower;
     this.currentTerm = term;
     this.votedFor = null;
     if (leaderId !== undefined) this.leaderId = leaderId;
+    if (leaderAddr !== undefined) this.leaderAddr = leaderAddr;
     this.persistState();
     log('info', 'become_follower', { term, leaderId: this.leaderId });
 
@@ -125,6 +132,7 @@ export class RaftNode {
   becomeLeader(): void {
     this.state = NodeState.Leader;
     this.leaderId = this.replicaId;
+    this.leaderAddr = this.selfUrl;
     log('info', 'become_leader', { term: this.currentTerm });
 
     // Initialize leader volatile state
@@ -269,9 +277,10 @@ export class RaftNode {
     }
 
     if (args.term > this.currentTerm || this.state !== NodeState.Follower) {
-      this.becomeFollower(args.term, args.leaderId);
+      this.becomeFollower(args.term, args.leaderId, args.leaderAddr);
     } else {
       this.leaderId = args.leaderId;
+      if (args.leaderAddr !== undefined) this.leaderAddr = args.leaderAddr;
       this.timerManager.resetElectionTimer();
     }
 
@@ -332,9 +341,10 @@ export class RaftNode {
     }
 
     if (args.term > this.currentTerm || this.state !== NodeState.Follower) {
-      this.becomeFollower(args.term, args.leaderId);
+      this.becomeFollower(args.term, args.leaderId, args.leaderAddr);
     } else {
       this.leaderId = args.leaderId;
+      if (args.leaderAddr !== undefined) this.leaderAddr = args.leaderAddr;
       this.timerManager.resetElectionTimer();
     }
 
@@ -374,6 +384,7 @@ export class RaftNode {
         const args: AppendEntriesArgs = {
           term: this.currentTerm,
           leaderId: this.replicaId,
+          leaderAddr: this.selfUrl,
           prevLogIndex,
           prevLogTerm,
           entries,
@@ -402,6 +413,7 @@ export class RaftNode {
         const args: AppendEntriesArgs = {
           term: this.currentTerm,
           leaderId: this.replicaId,
+          leaderAddr: this.selfUrl,
           prevLogIndex,
           prevLogTerm,
           entries: [],
@@ -455,6 +467,7 @@ export class RaftNode {
     const args: AppendEntriesArgs = {
       term: this.currentTerm,
       leaderId: this.replicaId,
+      leaderAddr: this.selfUrl,
       prevLogIndex,
       prevLogTerm,
       entries,
@@ -710,7 +723,7 @@ export class RaftNode {
 
   async handleClientWrite(stroke: Stroke): Promise<ClientWriteResult> {
     if (this.state !== NodeState.Leader) {
-      return { success: false, leaderHint: this.leaderId ?? undefined };
+      return { success: false, leaderHint: this.leaderAddr ?? undefined };
     }
 
     const entry: LogEntry = {
@@ -746,6 +759,7 @@ export class RaftNode {
           const args: AppendEntriesArgs = {
             term: this.currentTerm,
             leaderId: this.replicaId,
+            leaderAddr: this.selfUrl,
             prevLogIndex,
             prevLogTerm,
             entries,
@@ -771,7 +785,7 @@ export class RaftNode {
       );
 
       if (this.state !== NodeState.Leader) {
-        return { success: false, leaderHint: this.leaderId ?? undefined };
+        return { success: false, leaderHint: this.leaderAddr ?? undefined };
       }
 
       ackCount = 1;
@@ -796,14 +810,9 @@ export class RaftNode {
   async requestCatchUp(): Promise<void> {
     if (this.state !== NodeState.Follower) return;
 
-    // leaderId may be a URL (exact peer match) or a replica name (contained in a peer URL)
-    let leaderUrl: string | undefined;
-    if (this.leaderId) {
-      leaderUrl = this.peers.find((p) => p === this.leaderId) ??
-                  this.peers.find((p) => p.includes(this.leaderId!));
-    }
-    // If leader unknown or not found, try each peer
-    const targets = leaderUrl ? [leaderUrl] : [...this.peers];
+    // leaderAddr is the explicit URL learned from AppendEntries/Heartbeat (L3) — no more
+    // name-substring guessing against the peer list.
+    const targets = this.leaderAddr ? [this.leaderAddr] : [...this.peers];
     if (targets.length === 0) return;
 
     log('info', 'catch_up_start', { leader: this.leaderId, fromIndex: this.log.getLastIndex() + 1 });
@@ -863,6 +872,63 @@ export class RaftNode {
         log('warn', 'catch_up_failed', { target });
       }
     }
+  }
+
+  // --- ReadIndex (L3): confirm this node is still leader before serving a read ---
+
+  // Raft §6.4: a leader isolated on the minority side of a partition doesn't know it has been
+  // superseded until an RPC informs it. A majority of heartbeat acks (still this term, no
+  // higher term seen) proves no new leader has been elected — only then is it safe to answer
+  // reads from local state instead of a stale view. Reuses the existing /heartbeat RPC; no
+  // clock/lease assumptions.
+  private async confirmLeadership(): Promise<boolean> {
+    if (this.state !== NodeState.Leader) return false;
+    const term = this.currentTerm;
+    const majority = Math.floor((this.peers.length + 1) / 2) + 1;
+    let acks = 1; // self
+
+    const args: HeartbeatArgs = {
+      term,
+      leaderId: this.replicaId,
+      leaderAddr: this.selfUrl,
+      leaderCommit: this.commitIndex,
+    };
+
+    const results = await Promise.allSettled(
+      this.peers.map((peer) => this.rpcClient.sendHeartbeat(peer, args)),
+    );
+
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      if (r.value.term > this.currentTerm) {
+        this.becomeFollower(r.value.term);
+        return false;
+      }
+      if (r.value.success) acks++;
+    }
+
+    return this.state === NodeState.Leader && this.currentTerm === term && acks >= majority;
+  }
+
+  // Serves /board-state only after confirming leadership via confirmLeadership(), so a
+  // minority-partitioned leader can't hand back a stale-authoritative view (the defect this
+  // layer fixes). Known bound: a freshly-elected leader's commitIndex may briefly lag the true
+  // committed index until it commits a current-term entry — never wrong data, just briefly
+  // behind (see DECISIONS.md D13; no-op-on-election is the named upgrade path, not implemented
+  // here).
+  async readBoardState(boardId: string): Promise<ReadBoardStateResult> {
+    if (this.state !== NodeState.Leader) {
+      return { success: false, leaderHint: this.leaderAddr ?? undefined };
+    }
+
+    const confirmed = await this.confirmLeadership();
+    if (!confirmed) {
+      return { success: false, leaderHint: this.leaderAddr ?? undefined };
+    }
+
+    // applyCommitted() runs synchronously on every commit-index advance, so lastApplied is
+    // already caught up to commitIndex by the time confirmLeadership() resolves — no wait loop.
+    return { success: true, strokes: this.getStrokes(boardId) };
   }
 
   // --- Query methods ---

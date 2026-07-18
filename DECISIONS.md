@@ -18,6 +18,77 @@
 
 ---
 
+### D14 — Explicit leader address replaces name-substring redirect
+- Date: 2026-07-19
+- Context: `leaderHint`/`leaderId` was a replica *name* (`"replica1"`), and both the gateway
+  (`remoteRaftClient.ts:41`, old code) and a restarting follower's `requestCatchUp` resolved it
+  with `peers.find(p => p.includes(hint))` — fragile (`replica1` ⊂ a hypothetical `replica10`)
+  and only worked because compose names happened to be unique prefixes.
+- Decision: added a parallel `leaderAddr: string | null` (RaftNode) carrying an explicit URL,
+  sourced from a new `advertisedUrl` config field (`ADVERTISED_URL` env, default
+  `http://${replicaId}:${port}` — already matches how peers reference each other under
+  docker-compose, so no compose changes were needed). `AppendEntriesArgs`/`HeartbeatArgs` gained
+  an optional `leaderAddr` field the leader stamps on every RPC; followers copy it onto
+  `leaderAddr` next to the existing `leaderId`. `handleClientWrite`'s not-leader reply,
+  `readBoardState`'s not-leader/unconfirmed reply, and `requestCatchUp`'s target selection all
+  switched from `leaderId`/`includes()` to `leaderAddr` directly. `leaderId` (the name) is kept
+  as-is for `/status`, logs, and the frontend cluster dashboard — it's a display value, not a
+  routing key, and changing that surface wasn't in scope.
+- Why: an explicit address is correct by construction; a name is not enough information to
+  route on without a lookup that can be wrong.
+- Alternatives considered: keep name-only and require peer URLs to be exact-match on the name
+  (rejected — still fragile if a deploy renames a host without updating one side); resolve via
+  DNS/service-discovery (rejected — free-tier/docker-compose topology doesn't need it, adds a
+  dependency for no benefit at this scale).
+- Tradeoffs / risks: two leader-identity fields (`leaderId` name, `leaderAddr` URL) now must be
+  kept in sync at every call site that sets one — a future change that adds a new leader-setting
+  path (e.g. a new RPC type) must remember to set both. `InstallSnapshotArgs` was **not** given a
+  `leaderAddr` field (scoped out — that path only fires for a far-behind follower, which will
+  also be receiving heartbeats/AppendEntries that carry it moments later); noted here so it's
+  not mistaken for an oversight.
+
+### D13 — ReadIndex over leader lease for correct reads; fresh-leader gap documented, not fixed
+- Date: 2026-07-19
+- Context: `GET /board-state` answered from local state unconditionally. A leader isolated on
+  the minority side of a partition still believes it's leader (no RPC has told it otherwise)
+  and would serve a stale-authoritative view while the majority side has already elected a new
+  leader and moved on — backlog item #3 (HIGH) from the L0 audit.
+- Decision: implemented **ReadIndex** (Raft §6.4), not a leader lease. `RaftNode.readBoardState`
+  records the current `commitIndex`, then calls a new `confirmLeadership()` which sends the
+  already-existing `/heartbeat` RPC to every peer and requires a majority of acks (self + peer
+  acks, same term) before answering; any higher-term reply steps the node down
+  (`becomeFollower`) and the read is refused. Only on confirmation does it return
+  `getStrokes(boardId)`. `rpcHandlers.ts`'s `GET /board-state` returns **421 Misdirected
+  Request** + `{ leaderHint }` on refusal (not-leader or unconfirmed) so the gateway can tell
+  "not authoritative" apart from "confirmed empty board" (200, `strokes: []`). Gateway
+  `remoteRaftClient.getStrokes` follows a 421's `leaderHint` (an explicit URL — see D14) one hop
+  before falling through to the next peer.
+- Why ReadIndex over lease: no clock-synchronization/bounded-drift assumption between nodes —
+  correctness rests only on the same majority-RPC-round argument used everywhere else in this
+  Raft implementation, which is what makes it defensible without hedging in an interview. A
+  lease would shave the RPC round-trip off every read but requires trusting each node's clock
+  drift stays inside the lease window, which this project doesn't want to assume or benchmark.
+- **Known bound, not fixed here:** a freshly-elected leader's `commitIndex` reflects only
+  entries committed under the current-term commit rule (§5.4.2) — until it commits its first
+  current-term entry, `readBoardState` can under-report the last few strokes from before the
+  election. This is never *wrong* data and never a stale-from-a-superseded-leader read (the
+  property this layer guarantees); it's a narrow, self-closing window (closed by the very next
+  committed write) rather than a safety violation. Upgrade path if it ever needs closing: have
+  `becomeLeader()` append a no-op `LogEntry` so `commitIndex` becomes current-term-accurate
+  immediately — not implemented this layer to keep L3 scoped to the two audit defects and avoid
+  extending the stroke/apply path for a bound that's already tightly closed in practice.
+- Alternatives considered: leader lease (rejected, clock-assumption above); waiting for
+  `lastApplied >= readIndex` with a poll loop (unnecessary — `applyCommitted()` already runs
+  synchronously on every commit-index advance, so by the time `confirmLeadership()`'s awaited
+  heartbeat round resolves, any concurrently-committed entry up to that point has already been
+  applied; no separate wait needed).
+- Tradeoffs / risks: every `/board-state` read now costs one extra RPC round-trip (a majority
+  heartbeat), versus the previous free local read. Given the read path is a join/refresh
+  operation (not a hot per-keystroke path — strokes stream over the websocket separately), this
+  cost is accepted without a fallback fast-path.
+
+---
+
 ### D12 — L2 snapshot & log compaction implementation choices
 - Date: 2026-07-18
 - Context: L1 made the WAL durable but unbounded — a cold restart replays the full log, and a

@@ -48,6 +48,9 @@ export interface RequestVoteResult {
 export interface AppendEntriesArgs {
   term: number;
   leaderId: string;
+  // Explicit routing address for the leader (L3) — replaces name-substring redirect matching.
+  // Optional so older/mocked callers that don't set it still type-check.
+  leaderAddr?: string;
   prevLogIndex: number;
   prevLogTerm: number;
   entries: LogEntry[];
@@ -66,6 +69,7 @@ export interface AppendEntriesResult {
 export interface HeartbeatArgs {
   term: number;
   leaderId: string;
+  leaderAddr?: string;
   leaderCommit: number;
 }
 
@@ -127,6 +131,16 @@ export interface ClientWriteArgs {
 
 export interface ClientWriteResult {
   success: boolean;
+  leaderHint?: string;
+}
+
+// --- Read (gateway → leader), ReadIndex-confirmed (L3) ---
+
+export interface ReadBoardStateResult {
+  success: boolean;
+  strokes?: Stroke[];
+  // Explicit leader URL, present when this node can't confirm it's still the leader
+  // (not leader, or a majority-heartbeat round failed/timed out — see raftNode.readBoardState).
   leaderHint?: string;
 }
 
