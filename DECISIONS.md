@@ -18,6 +18,44 @@
 
 ---
 
+### D11 — L1 persistence implementation choices (finalizes D05)
+- Date: 2026-07-18
+- Context: D05 committed to a hand-rolled WAL + fsynced `state.json` but left the format,
+  fsync mechanics, and `commitIndex` durability open. Implemented in `replica/src/persistence.ts`.
+- Decision:
+  - **Format:** WAL is append-only **JSONL** (one `LogEntry` per line); state is
+    `{currentTerm, votedFor, commitIndex}` in a single small JSON file. Both human-inspectable.
+  - **Fsync mechanics:** synchronous Node fs calls (`writeSync`/`fsyncSync`, `appendFileSync`
+    pattern) so the RPC reply is provably sent only after the sync call returns — no async
+    plumbing threaded through every handler. State writes and WAL truncation-rewrites go
+    through an atomic temp-file-then-`renameSync` (+ directory fsync) so a crash mid-write
+    never leaves a corrupt `state.json` or a partially-truncated log. Directory fsync is a
+    no-op on win32 (NTFS/libuv can't fsync a directory fd) — dev-only gap, real on prod Linux.
+  - **Torn WAL tail:** only the *last* line can be a partial write from a crash mid-append; the
+    loader parses line-by-line and drops an unparseable final line, throws on any earlier one
+    (that would indicate real corruption, not a torn write).
+  - **commitIndex is persisted** (a deliberate deviation from the paper's volatile
+    `commitIndex`): committed entries are never truncated, so persisted `commitIndex ≤ log
+    length` always holds — no safety cost — and it lets a solo/cold restart rebuild the board
+    from the log immediately instead of waiting for the leader to re-advance commit.
+  - **Wiring:** `Persistence` is dependency-injected into `RaftLog`/`RaftNode` (default
+    `MemoryPersistence`, so all pre-L1 tests and call sites are untouched); `index.ts`
+    constructs `FilePersistence(DATA_DIR)` only when `DATA_DIR` is set.
+- Why: keeps the durability mechanics (write-ahead, fsync-before-reply, atomic replace,
+  torn-tail handling) fully hand-rolled and explainable, per D05's rationale.
+- Alternatives considered: fsync every N entries / debounced (rejected for L1 — batching is
+  the documented L4/L8 tuning knob, not a correctness change); volatile commitIndex per the
+  strict paper reading (rejected — no safety gain, worse recovery UX).
+- Tradeoffs / risks: fsync-per-write costs latency (accepted, to be measured at L8); directory
+  fsync doesn't run on Windows dev machines, only prod Linux — noted with a `ponytail:` comment
+  at the call site so it isn't mistaken for an oversight.
+- Verified: `tests/replica/persistence.test.ts` (state/WAL roundtrip, atomic rewrite, torn-tail
+  drop) and `tests/replica/crashRecovery.test.ts` (process-level crash-recovery identity check;
+  no-double-vote-across-restart — fails without this change). Docker gate: hard-killed
+  `replica2` mid-cluster, `state.json`/`log.jsonl` verified on the host bind mount, restarted
+  container reloaded `currentTerm` (did not reset to 0), caught up the write it missed while
+  dead, and served the correct board state.
+
 ### D10 — Per-replica instance dirs are gitignored runtime state, not source (L0)
 - Date: 2026-07-18
 - Context: `replica1..4/` each held only a placeholder `README.md` whose sole purpose was to keep the (otherwise empty) Docker bind-mount source dir tracked in git.

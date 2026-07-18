@@ -1,4 +1,5 @@
 import { RaftLog } from './raftLog.js';
+import { MemoryPersistence, type Persistence } from './persistence.js';
 import { log } from './logger.js';
 import {
   NodeState,
@@ -19,10 +20,11 @@ import {
 } from './types.js';
 
 export class RaftNode {
-  // Persistent state
+  // Persistent state (currentTerm, votedFor, commitIndex fsynced via persistState(); log
+  // fsyncs itself in RaftLog.append/truncateFrom — see persistence.ts)
   currentTerm = 0;
   votedFor: string | null = null;
-  readonly log = new RaftLog();
+  readonly log: RaftLog;
 
   // Volatile state
   state: NodeState = NodeState.Follower;
@@ -44,7 +46,29 @@ export class RaftNode {
     public readonly peers: string[],
     private rpcClient: RpcClient,
     private timerManager: TimerManager,
-  ) {}
+    private persistence: Persistence = new MemoryPersistence(),
+  ) {
+    this.log = new RaftLog(persistence);
+
+    const saved = persistence.loadState();
+    this.currentTerm = saved.currentTerm;
+    this.votedFor = saved.votedFor;
+    this.commitIndex = saved.commitIndex;
+    // Rebuild board state from the persisted log so a solo/cold restart shows it
+    // immediately, without waiting on a leader to re-advance commit (DECISIONS D05).
+    this.applyCommitted();
+  }
+
+  // Fsyncs {currentTerm, votedFor, commitIndex} before returning. Call this BEFORE sending
+  // any RPC reply that depends on the value just changed (Raft persistence rule, §5.2/§5.4;
+  // CLAUDE.md §4) — see becomeFollower/becomeCandidate/handleRequestVote/commit-advance sites.
+  private persistState(): void {
+    this.persistence.saveState({
+      currentTerm: this.currentTerm,
+      votedFor: this.votedFor,
+      commitIndex: this.commitIndex,
+    });
+  }
 
   // --- Startup / Shutdown ---
 
@@ -67,6 +91,7 @@ export class RaftNode {
     this.currentTerm = term;
     this.votedFor = null;
     if (leaderId !== undefined) this.leaderId = leaderId;
+    this.persistState();
     log('info', 'become_follower', { term, leaderId: this.leaderId });
 
     if (wasLeader) {
@@ -80,6 +105,7 @@ export class RaftNode {
     this.currentTerm++;
     this.votedFor = this.replicaId;
     this.leaderId = null;
+    this.persistState();
     log('info', 'become_candidate', { term: this.currentTerm });
   }
 
@@ -198,6 +224,9 @@ export class RaftNode {
     if (canVote) {
       this.votedFor = args.candidateId;
       this.currentTerm = args.term;
+      // Fsync the vote BEFORE replying — the durability property this layer exists to add.
+      // Without this, a restart forgets the vote and can grant a second vote in this term.
+      this.persistState();
       this.timerManager.resetElectionTimer();
       log('info', 'vote_granted', { to: args.candidateId, term: args.term });
     } else {
@@ -265,6 +294,7 @@ export class RaftNode {
     // Update commit index
     if (args.leaderCommit > this.commitIndex) {
       this.commitIndex = Math.min(args.leaderCommit, this.log.getLastIndex());
+      this.persistState();
       this.applyCommitted();
     }
 
@@ -287,6 +317,7 @@ export class RaftNode {
 
     if (args.leaderCommit > this.commitIndex) {
       this.commitIndex = Math.min(args.leaderCommit, this.log.getLastIndex());
+      this.persistState();
       this.applyCommitted();
     }
 
@@ -432,6 +463,7 @@ export class RaftNode {
       if (replicatedCount >= majority) {
         const oldCommit = this.commitIndex;
         this.commitIndex = n;
+        this.persistState();
         log('info', 'commit_advance', { from: oldCommit, to: n, term: this.currentTerm });
         this.applyCommitted();
         break;
@@ -660,6 +692,7 @@ export class RaftNode {
 
         if (result.commitIndex > this.commitIndex) {
           this.commitIndex = Math.min(result.commitIndex, this.log.getLastIndex());
+          this.persistState();
           this.applyCommitted();
         }
 

@@ -3,7 +3,29 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-18 — Layer 0 (Baseline & cleanup) COMPLETE.** Gate passed (evidence below).
+- **2026-07-18 — Layer 1 (Durable persistence) COMPLETE.** Gate passed (evidence below).
+  - New `replica/src/persistence.ts`: `Persistence` interface, `FilePersistence` (JSONL WAL +
+    fsynced `state.json` holding `{currentTerm, votedFor, commitIndex}`, atomic temp-file +
+    rename + dir-fsync, torn-tail-tolerant loader), `MemoryPersistence` default (D11).
+  - `raftLog.ts` takes `Persistence`, seeds from `loadLog()`, fsyncs on `append`/`truncateFrom`.
+  - `raftNode.ts` takes `Persistence` (5th, defaulted ctor param); loads
+    `{currentTerm, votedFor, commitIndex}` + replays board state on construct; new
+    `persistState()` fsyncs before every RPC reply that depends on the change —
+    `becomeFollower`, `becomeCandidate`, `handleRequestVote` (the no-double-vote seam), and
+    every commit-index advance (`updateCommitIndex`, `handleAppendEntries`, `handleHeartbeat`,
+    `requestCatchUp`).
+  - `config.ts` adds `DATA_DIR`; `index.ts` wires `FilePersistence` when set;
+    `docker-compose.yml` sets `DATA_DIR=/app/instance` for replica1..3 (existing bind mount).
+  - **Gate evidence:** `tsc --noEmit` clean; `npm test` green — replica **88/88** (81 prior +
+    7 new: `persistence.test.ts` state/WAL roundtrip + atomic rewrite + torn-tail, plus
+    `crashRecovery.test.ts` crash-recovery identity and no-double-vote-across-restart, which
+    fails without this change), gateway **41/41**, frontend **41/41** unaffected. Docker e2e:
+    `docker compose up` all healthy; stroke committed to all 3; `docker kill -9` on replica2
+    mid-cluster; second stroke still committed via replica1+replica3 majority; `state.json` +
+    `log.jsonl` confirmed on the host bind mount; `docker start` replica2 → reloaded
+    `currentTerm=4` (did not reset to 0), caught up the missed write, board state correct
+    (**RESULT: PASS**).
+- Prior: Layer 0 (Baseline & cleanup) COMPLETE.
   - Cluster 4→3 replicas: `docker-compose.yml`, peer lists, gateway `RAFT_PEERS`, deleted
     `replica4/`; updated README, Documentation.md, and both demo scripts (no `replica4`/`3004` refs left).
   - Removed placeholder `replica{1..4}/README.md`; gitignored `replica1..3/` instance dirs (D10).
@@ -21,13 +43,13 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 1 — Durable persistence** (the critical fix, awaiting approval per PRIME DIRECTIVE):
-  hand-rolled WAL + fsynced `state.json`, reload/replay on boot, new `DATA_DIR` on the
-  gitignored instance dirs. Gate: crash-recovery + no-double-vote-across-restart tests (D05).
+- **Layer 2 — Snapshot & log compaction** (awaiting approval per PRIME DIRECTIVE): periodic
+  board-state snapshot + `lastIncludedIndex/lastIncludedTerm`, truncate WAL prefix,
+  `InstallSnapshot`-style catch-up for a follower far behind the leader's log start.
 
 ## Prioritized defect backlog (from the audit)
-1. **[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
-   split-brain / lost commits. → **L1**
+1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
+   split-brain / lost commits.~~ → **FIXED in L1** (D11).
 2. **[HIGH]** No snapshot / log compaction — unbounded log, full replay on restart. → **L2**
 3. **[HIGH]** Stale reads on minority-partition leader (no ReadIndex/lease). → **L3**
 4. **[MED]** Unbounded AppendEntries payload (no batch cap / backpressure). → **L4**

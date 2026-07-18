@@ -1,10 +1,18 @@
 import type { LogEntry } from './types.js';
+import { MemoryPersistence, type Persistence } from './persistence.js';
 
 export class RaftLog {
   private entries: LogEntry[] = [];
 
+  constructor(private readonly persistence: Persistence = new MemoryPersistence()) {
+    this.entries = this.persistence.loadLog();
+  }
+
+  // Appends in memory, then fsyncs to the WAL before returning — callers (raftNode) only
+  // reply to the dependent RPC after this resolves, satisfying CLAUDE.md §4 durability.
   append(entry: LogEntry): void {
     this.entries.push(entry);
+    this.persistence.appendLog(entry);
   }
 
   getEntry(index: number): LogEntry | undefined {
@@ -29,6 +37,7 @@ export class RaftLog {
   truncateFrom(index: number): void {
     if (index < 1 || index > this.entries.length) return;
     this.entries.length = index - 1;
+    this.persistence.rewriteLog(this.entries);
   }
 
   getLength(): number {

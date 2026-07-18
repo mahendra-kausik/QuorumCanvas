@@ -6,6 +6,8 @@ export interface ReplicaConfig {
   replicaId: string;
   port: number;
   peers: string[];
+  // Directory for the WAL + state.json (L1 durability). Unset → in-memory only (e.g. tests).
+  dataDir?: string;
 }
 
 export function parseConfig(env: Record<string, string | undefined>): ReplicaConfig {
@@ -18,7 +20,9 @@ export function parseConfig(env: Record<string, string | undefined>): ReplicaCon
   const peersStr = env.PEERS ?? '';
   const peers = peersStr ? peersStr.split(',').map((p) => p.trim()) : [];
 
-  return { replicaId, port, peers };
+  const dataDir = env.DATA_DIR || undefined;
+
+  return { replicaId, port, peers, dataDir };
 }
 
 // Raft timing, milliseconds. The election-timeout window must sit well above the heartbeat

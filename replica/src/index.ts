@@ -5,6 +5,7 @@ import { DefaultTimerManager } from './electionTimer.js';
 import { HttpRpcClient } from './rpcClient.js';
 import { createRpcRouter } from './rpcHandlers.js';
 import { parseConfig, RAFT_TIMING, type ReplicaConfig } from './config.js';
+import { FilePersistence, MemoryPersistence } from './persistence.js';
 import type { RpcClient, TimerManager } from './types.js';
 
 // Re-exported for callers/tests that import config from the service entrypoint.
@@ -16,7 +17,10 @@ export function createApp(config: ReplicaConfig, deps?: { rpcClient?: RpcClient;
 
   const rpcClient = deps?.rpcClient ?? new HttpRpcClient();
   const timerManager = deps?.timerManager ?? new DefaultTimerManager({ replicaId: config.replicaId });
-  const raftNode = new RaftNode(config.replicaId, config.peers, rpcClient, timerManager);
+  // Replay (term/vote/commitIndex + WAL) happens synchronously inside the RaftNode
+  // constructor, before this replica can vote, be elected, or serve traffic.
+  const persistence = config.dataDir ? new FilePersistence(config.dataDir) : new MemoryPersistence();
+  const raftNode = new RaftNode(config.replicaId, config.peers, rpcClient, timerManager, persistence);
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', replicaId: config.replicaId });
