@@ -10,6 +10,8 @@ export interface ReplicaConfig {
   dataDir?: string;
   // Override RAFT_TIMING.snapshotThresholdEntries (L2). Unset → use the default.
   snapshotThresholdEntries?: number;
+  // Override RAFT_TIMING.appendEntriesBatchCap (L4). Unset → use the default.
+  appendEntriesBatchCap?: number;
   // Explicit URL peers/gateway should use to reach this node as leader (L3) — replaces the
   // fragile replicaId-substring redirect. Unset → RaftNode falls back to a same-container
   // hostname guess; set ADVERTISED_URL explicitly for any other deploy topology.
@@ -34,7 +36,11 @@ export function parseConfig(env: Record<string, string | undefined>): ReplicaCon
 
   const advertisedUrl = env.ADVERTISED_URL || `http://${replicaId}:${port}`;
 
-  return { replicaId, port, peers, dataDir, snapshotThresholdEntries, advertisedUrl };
+  const appendEntriesBatchCap = env.APPEND_ENTRIES_BATCH_CAP
+    ? parseInt(env.APPEND_ENTRIES_BATCH_CAP, 10)
+    : undefined;
+
+  return { replicaId, port, peers, dataDir, snapshotThresholdEntries, advertisedUrl, appendEntriesBatchCap };
 }
 
 // Raft timing, milliseconds. The election-timeout window must sit well above the heartbeat
@@ -54,4 +60,8 @@ export const RAFT_TIMING = {
   // Snapshot after this many committed entries since the last snapshot (L2 log compaction).
   // Tuned against benchmarks at L8; small enough here to keep the WAL bounded on a free-tier disk.
   snapshotThresholdEntries: 500,
+  // Max log entries per AppendEntries RPC (L4 backpressure). Bounds payload/memory for a
+  // far-behind follower (large write burst, wiped-node catch-up) instead of sending the whole
+  // tail in one message; the next replication drive continues from the advanced nextIndex.
+  appendEntriesBatchCap: 128,
 } as const;

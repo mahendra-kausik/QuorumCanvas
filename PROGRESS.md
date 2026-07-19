@@ -3,7 +3,39 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-19 — Layer 3 (Correct reads + explicit leader redirect) COMPLETE.** Gate passed
+- **2026-07-19 — Layer 4 (Backpressure & single replication driver) COMPLETE.** Gate passed
+  (evidence below).
+  - **Single guarded replication driver** (D15): the three previously-duplicated replication call
+    sites (`sendHeartbeats`, `syncCommittedEntries`, `handleClientWrite`'s per-write loop) collapse
+    into one `RaftNode.replicateOnce(peer)`, wrapped by `driveReplication(peer)` — a
+    `Map<string, Promise<void>>` of in-flight sends per peer. A second caller targeting a peer
+    already mid-send awaits the same promise instead of racing a duplicate AppendEntries
+    (`replication_coalesced` logged); `nextIndex`/`matchIndex` are now only ever mutated inside one
+    drive per peer at a time, closing the heartbeat-timer-vs-client-write race (audit backlog #5).
+    `syncCommittedEntries` is deleted — a backed-off peer's `nextIndex` is simply picked up by the
+    next drive. `handleClientWrite`'s ack-counting switched from the calling RPC's own result to
+    reading `matchIndex` directly — correct regardless of which caller's drive actually advanced a
+    coalesced peer.
+  - **AppendEntries batch cap** (D15): `replicateOnce` slices
+    `getEntriesFrom(nextIdx).slice(0, this.batchCap)` — new `batchCap` ctor param, default
+    `RAFT_TIMING.appendEntriesBatchCap = 128`, overridable via `APPEND_ENTRIES_BATCH_CAP` env
+    (mirrors L2's `SNAPSHOT_THRESHOLD` pattern) — bounding RPC payload/memory for a far-behind
+    follower instead of sending the whole log tail in one message (audit backlog #4).
+  - **Gate evidence:** `tsc --noEmit` clean (replica + gateway). `npm test` green — replica
+    **101/101** (98 prior + 3 new in `tests/replica/backpressure.test.ts`: a single AppendEntries
+    is capped at the configured limit **[the property this layer exists to add]**, a follow-up
+    drive resumes from the advanced `nextIndex` until fully caught up, and a concurrent heartbeat +
+    client-write to the same peer coalesce onto one in-flight send rather than racing — verified
+    via a concurrency counter in the mock RPC client), gateway **42/42**, frontend **41/41**
+    unaffected. Docker e2e (`docker compose up`, 3 replicas + gateway healthy, temporary
+    `APPEND_ENTRIES_BATCH_CAP=3` to force multi-batch, reverted after): fired 15 sequential writes
+    directly at the leader (`POST /client-write`) — **15/15 succeeded**, all 3 replicas converged
+    on `commitIndex=15` with identical board state; replica1's logs show **36
+    `replication_coalesced` events** during the burst (heartbeat and client-write both targeting
+    the same peer concurrently — the race this layer closes) and **zero**
+    `append_entries_mismatch`/`sync_committed_retry` churn, with `commit_advance` progressing
+    cleanly 1→15 (**RESULT: PASS**).
+- Prior: Layer 3 (Correct reads + explicit leader redirect) COMPLETE. Gate passed
   (evidence below).
   - **ReadIndex** (D13): new `RaftNode.confirmLeadership()` sends the existing `/heartbeat` RPC
     to all peers and requires a majority of same-term acks (self + peers) before a read is
@@ -122,10 +154,10 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 4 — Backpressure & single replication driver** (awaiting approval per PRIME
-  DIRECTIVE): cap entries per AppendEntries (batch size); one replication driver per peer with
-  an in-flight guard so the 150 ms heartbeat and a concurrent `handleClientWrite` can't both
-  mutate `nextIndex`/`matchIndex` and double-send.
+- **Layer 5 — Observability & lifecycle** (awaiting approval per PRIME DIRECTIVE): structured
+  JSON logs (extend existing `logger`), Prometheus `/metrics` per replica (state, currentTerm,
+  commitIndex, log length, elections started, leadership changes, write latency histogram),
+  split `/health` (liveness) vs `/ready` (joined + caught up), graceful shutdown on SIGTERM.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
@@ -134,8 +166,10 @@
    **FIXED in L2** (D12).
 3. ~~**[HIGH]** Stale reads on minority-partition leader (no ReadIndex/lease).~~ → **FIXED in
    L3** (D13).
-4. **[MED]** Unbounded AppendEntries payload (no batch cap / backpressure). → **L4**
-5. **[MED]** `nextIndex`/`matchIndex` race between heartbeat timer and `handleClientWrite`. → **L4**
+4. ~~**[MED]** Unbounded AppendEntries payload (no batch cap / backpressure).~~ → **FIXED in
+   L4** (D15).
+5. ~~**[MED]** `nextIndex`/`matchIndex` race between heartbeat timer and `handleClientWrite`.~~ →
+   **FIXED in L4** (D15).
 6. ~~**[LOW]** Leader hint is a name matched by `url.includes()` — fragile.~~ → **FIXED in L3**
    (D14).
 7. **[LOW]** 4 replicas (even quorum) — move to 3. → **L0**

@@ -28,6 +28,7 @@ export function createApp(config: ReplicaConfig, deps?: { rpcClient?: RpcClient;
     persistence,
     config.snapshotThresholdEntries ?? RAFT_TIMING.snapshotThresholdEntries,
     config.advertisedUrl ?? `http://${config.replicaId}:${config.port}`,
+    config.appendEntriesBatchCap ?? RAFT_TIMING.appendEntriesBatchCap,
   );
 
   app.get('/health', (_req, res) => {

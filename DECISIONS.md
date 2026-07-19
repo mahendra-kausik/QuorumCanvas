@@ -18,6 +18,57 @@
 
 ---
 
+### D15 — Single guarded replication driver per peer + AppendEntries batch cap
+- Date: 2026-07-19
+- Context: `raftNode.ts` had **three** independent replication call sites hitting the same peer —
+  `sendHeartbeats` (150ms timer), `syncCommittedEntries` (failure back-off retry), and
+  `handleClientWrite` (per-write replication loop) — each reading `nextIndex`, building an
+  `AppendEntriesArgs`, calling `appendEntries`, and mutating `nextIndex`/`matchIndex`
+  independently. A heartbeat tick and a concurrent client write could both be in flight to the
+  same peer at once, racing on those maps and double-sending overlapping entries (audit backlog
+  #5). Separately, every one of those sites called `log.getEntriesFrom(nextIdx)` with **no
+  cap** — a far-behind follower (wiped-node catch-up, or a write burst) could receive its entire
+  log tail in one RPC, unbounded payload/memory (audit backlog #4).
+- Decision: collapsed the three duplicated call sites into one `replicateOnce(peer)` — reads
+  `nextIndex`, slices `getEntriesFrom(nextIdx).slice(0, this.batchCap)` (new `batchCap` ctor
+  param, default `RAFT_TIMING.appendEntriesBatchCap = 128`, overridable via
+  `APPEND_ENTRIES_BATCH_CAP` env — same pattern as L2's `SNAPSHOT_THRESHOLD`), sends
+  AppendEntries (or InstallSnapshot if the peer has fallen behind the compaction boundary), and
+  advances `nextIndex`/`matchIndex` by the slice actually sent (so a partial batch is picked up
+  correctly by the next drive). A new `driveReplication(peer)` wraps it with a
+  `Map<string, Promise<void>>` of in-flight sends: a second caller targeting a peer already
+  mid-send **awaits the same promise** instead of issuing a duplicate RPC (`replication_coalesced`
+  logged). Both `sendHeartbeats` and `handleClientWrite`'s retry loop now just call
+  `driveReplication` for every peer; `syncCommittedEntries` is deleted — its job (resuming a
+  behind peer) is now just "the next drive re-reads the backed-off `nextIndex`."
+  `handleClientWrite`'s ack-counting changed from "did this call's own RPC succeed" to reading
+  `matchIndex` directly after the drive — necessary because a coalesced peer's progress was
+  recorded by whichever drive was actually in flight, not by this call.
+- Why: one code path removes the duplication that caused the race by construction (a peer's
+  `nextIndex`/`matchIndex` are now only ever mutated inside one drive at a time); reading
+  `matchIndex` for acks is correct regardless of which caller's drive actually moved it, so
+  coalescing is transparent to `handleClientWrite`'s majority count. The batch cap bounds RPC
+  payload/memory without adding a new mechanism — it's the same slice-and-advance shape the
+  existing partial-catch-up code already had.
+- Alternatives considered: (a) a per-peer in-flight `Set` guard added to the *existing* three
+  call sites, skipping a send if one's already outstanding — smaller diff, but leaves the
+  duplication and still forces ack-counting through `matchIndex` anyway, so it gives up the win
+  (one path to reason about) for no real savings; rejected. (b) a long-lived background
+  replication loop per peer, decoupled from both the heartbeat timer and client-write calls
+  (closer to a "real" Raft implementation's dedicated replicator) — more correct under high
+  contention/pipelining, but a bigger structural change than this defect needs; named as the
+  documented upgrade path if L8 benchmarks show the coalescing guard bottlenecking throughput,
+  not built now.
+- Tradeoffs / risks: only one AppendEntries in flight per peer at a time — no pipelining of
+  multiple outstanding batches, so a very-far-behind follower catches up in serial capped
+  batches rather than a flood (acceptable; catch-up isn't the hot path). `matchIndex`-based ack
+  counting in `handleClientWrite` means a slow, unrelated in-flight heartbeat send can make a
+  client write's first attempt appear to under-ack even though the entry hasn't been sent yet
+  to that peer — closed by the existing 3-attempt retry loop, which re-drives on the next
+  iteration once the coalesced send completes.
+
+---
+
 ### D14 — Explicit leader address replaces name-substring redirect
 - Date: 2026-07-19
 - Context: `leaderHint`/`leaderId` was a replica *name* (`"replica1"`), and both the gateway

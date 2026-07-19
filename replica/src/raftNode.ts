@@ -42,6 +42,10 @@ export class RaftNode {
   // Leader-only volatile state
   nextIndex = new Map<string, number>();
   matchIndex = new Map<string, number>();
+  // In-flight replication RPC per peer (L4). Guards against the 150ms heartbeat timer and a
+  // concurrent handleClientWrite both sending AppendEntries to the same peer at once, which
+  // would race on nextIndex/matchIndex and double-send. See driveReplication().
+  private replicating = new Map<string, Promise<void>>();
 
   // Board state derived from committed entries
   private boardEvents = new Map<string, Stroke[]>();
@@ -57,6 +61,8 @@ export class RaftNode {
     private snapshotThreshold: number = RAFT_TIMING.snapshotThresholdEntries,
     // This node's own routing address, advertised as leaderAddr once it becomes leader (L3).
     private selfUrl: string = replicaId,
+    // Max log entries per AppendEntries RPC (L4 backpressure).
+    private batchCap: number = RAFT_TIMING.appendEntriesBatchCap,
   ) {
     this.log = new RaftLog(persistence);
 
@@ -362,107 +368,53 @@ export class RaftNode {
   async sendHeartbeats(): Promise<void> {
     if (this.state !== NodeState.Leader) return;
 
-    const promises = this.peers.map(async (peer) => {
-      const nextIdx = this.nextIndex.get(peer) ?? this.log.getLastIndex() + 1;
-
-      // The entries this peer needs (from nextIdx) have already been compacted out of our log
-      // — AppendEntries can no longer reconstruct prevLogTerm for it. Send the snapshot instead.
-      if (nextIdx <= this.log.getLastIncludedIndex()) {
-        await this.sendInstallSnapshot(peer);
-        return;
-      }
-
-      const prevLogIndex = nextIdx - 1;
-      // getTermAt, not getEntry().term — prevLogIndex can sit exactly at (or, after our own
-      // compaction races ahead, land on) the snapshot boundary, where getEntry() no longer
-      // has an entry to read a term from even though the term itself is still known.
-      const prevLogTerm = this.log.getTermAt(prevLogIndex);
-      const entries = this.log.getEntriesFrom(nextIdx);
-
-      if (entries.length > 0) {
-        // Send AppendEntries with new entries
-        const args: AppendEntriesArgs = {
-          term: this.currentTerm,
-          leaderId: this.replicaId,
-          leaderAddr: this.selfUrl,
-          prevLogIndex,
-          prevLogTerm,
-          entries,
-          leaderCommit: this.commitIndex,
-        };
-
-        try {
-          const result = await this.rpcClient.appendEntries(peer, args);
-          if (result.term > this.currentTerm) {
-            this.becomeFollower(result.term);
-            return;
-          }
-          if (result.success) {
-            this.nextIndex.set(peer, nextIdx + entries.length);
-            this.matchIndex.set(peer, nextIdx + entries.length - 1);
-          } else {
-            const fromIndex = Math.max(1, result.currentLogLength + 1);
-            this.nextIndex.set(peer, fromIndex);
-            await this.syncCommittedEntries(peer, fromIndex);
-          }
-        } catch {
-          // Network error — will retry on next heartbeat
-        }
-      } else {
-        // Empty AppendEntries acts as heartbeat and also detects stale followers.
-        const args: AppendEntriesArgs = {
-          term: this.currentTerm,
-          leaderId: this.replicaId,
-          leaderAddr: this.selfUrl,
-          prevLogIndex,
-          prevLogTerm,
-          entries: [],
-          leaderCommit: this.commitIndex,
-        };
-        try {
-          const result = await this.rpcClient.appendEntries(peer, args);
-          if (result.term > this.currentTerm) {
-            this.becomeFollower(result.term);
-            return;
-          }
-
-          if (result.success) {
-            const knownMatch = this.matchIndex.get(peer) ?? 0;
-            this.matchIndex.set(peer, Math.max(knownMatch, prevLogIndex));
-          } else {
-            const fromIndex = Math.max(1, result.currentLogLength + 1);
-            this.nextIndex.set(peer, fromIndex);
-            await this.syncCommittedEntries(peer, fromIndex);
-          }
-        } catch {
-          // Network error
-        }
-      }
-    });
-
-    await Promise.allSettled(promises);
+    await Promise.allSettled(this.peers.map((peer) => this.driveReplication(peer)));
 
     if (this.state === NodeState.Leader) {
       this.updateCommitIndex();
     }
   }
 
-  private async syncCommittedEntries(peer: string, fromIndex: number): Promise<void> {
-    if (this.state !== NodeState.Leader) return;
-    if (fromIndex > this.commitIndex) return;
+  // One replication RPC in flight per peer at a time (L4). A second caller — the 150ms
+  // heartbeat timer and a concurrent handleClientWrite both target every peer — awaits the
+  // already-in-flight send instead of issuing a duplicate, so nextIndex/matchIndex only ever
+  // move under one writer. matchIndex is the single source of truth for "did this replicate":
+  // callers who coalesce onto someone else's send still observe its result there.
+  private driveReplication(peer: string): Promise<void> {
+    const existing = this.replicating.get(peer);
+    if (existing) {
+      log('info', 'replication_coalesced', { peer });
+      return existing;
+    }
+    const p = this.replicateOnce(peer).finally(() => this.replicating.delete(peer));
+    this.replicating.set(peer, p);
+    return p;
+  }
 
-    if (fromIndex <= this.log.getLastIncludedIndex()) {
+  // The single AppendEntries/InstallSnapshot send path for a peer — folds together what were
+  // previously three duplicated call sites (sendHeartbeats, syncCommittedEntries,
+  // handleClientWrite). Caps the batch at this.batchCap (L4 backpressure): a far-behind peer
+  // (write burst, wiped-node catch-up) gets its tail in bounded slices, not one unbounded RPC;
+  // nextIndex/matchIndex advance by the slice actually sent, so the next drive picks up where
+  // this one left off.
+  private async replicateOnce(peer: string): Promise<void> {
+    if (this.state !== NodeState.Leader) return;
+
+    const nextIdx = this.nextIndex.get(peer) ?? this.log.getLastIndex() + 1;
+
+    // The entries this peer needs (from nextIdx) have already been compacted out of our log —
+    // AppendEntries can no longer reconstruct prevLogTerm for it. Send the snapshot instead.
+    if (nextIdx <= this.log.getLastIncludedIndex()) {
       await this.sendInstallSnapshot(peer);
       return;
     }
 
-    const prevLogIndex = fromIndex - 1;
+    const prevLogIndex = nextIdx - 1;
+    // getTermAt, not getEntry().term — prevLogIndex can sit exactly at (or, after our own
+    // compaction races ahead, land on) the snapshot boundary, where getEntry() no longer
+    // has an entry to read a term from even though the term itself is still known.
     const prevLogTerm = this.log.getTermAt(prevLogIndex);
-    const entries = this.log
-      .getEntriesFrom(fromIndex)
-      .filter((entry) => entry.index <= this.commitIndex);
-
-    if (entries.length === 0) return;
+    const entries = this.log.getEntriesFrom(nextIdx).slice(0, this.batchCap);
 
     const args: AppendEntriesArgs = {
       term: this.currentTerm,
@@ -482,17 +434,19 @@ export class RaftNode {
       }
 
       if (result.success) {
-        const lastSynced = entries[entries.length - 1].index;
-        this.nextIndex.set(peer, lastSynced + 1);
-        this.matchIndex.set(peer, lastSynced);
-        log('info', 'sync_committed_done', { peer, fromIndex, toIndex: lastSynced });
+        if (entries.length > 0) {
+          this.nextIndex.set(peer, nextIdx + entries.length);
+          this.matchIndex.set(peer, nextIdx + entries.length - 1);
+        } else {
+          const knownMatch = this.matchIndex.get(peer) ?? 0;
+          this.matchIndex.set(peer, Math.max(knownMatch, prevLogIndex));
+        }
       } else {
-        const retryFrom = Math.max(1, result.currentLogLength + 1);
-        this.nextIndex.set(peer, retryFrom);
-        log('warn', 'sync_committed_retry_needed', { peer, fromIndex, retryFrom });
+        const fromIndex = Math.max(1, result.currentLogLength + 1);
+        this.nextIndex.set(peer, fromIndex);
       }
     } catch {
-      log('warn', 'sync_committed_failed', { peer, fromIndex });
+      // Network error — the next heartbeat/write drive will retry from the same nextIndex.
     }
   }
 
@@ -736,61 +690,25 @@ export class RaftNode {
 
     log('info', 'client_write_appended', { index: entry.index, strokeId: stroke.id });
 
-    // Replicate to followers
+    // Replicate to followers. driveReplication funnels through the single guarded per-peer
+    // driver (L4) — if a heartbeat is already mid-send to a peer, this coalesces onto it rather
+    // than racing a second AppendEntries. Acks are counted from matchIndex, not from whichever
+    // RPC happened to resolve here, since a coalesced peer's progress is recorded by the
+    // in-flight send this call merely awaited.
     const majority = Math.floor((this.peers.length + 1) / 2) + 1;
     let ackCount = 1; // self
     const maxRetries = 3;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const results = await Promise.allSettled(
-        this.peers.map(async (peer) => {
-          const nextIdx = this.nextIndex.get(peer) ?? entry.index;
-          if (nextIdx > entry.index) return { peer, success: true };
-
-          if (nextIdx <= this.log.getLastIncludedIndex()) {
-            await this.sendInstallSnapshot(peer);
-            return { peer, success: false };
-          }
-
-          const prevLogIndex = nextIdx - 1;
-          const prevLogTerm = this.log.getTermAt(prevLogIndex);
-          const entries = this.log.getEntriesFrom(nextIdx);
-
-          const args: AppendEntriesArgs = {
-            term: this.currentTerm,
-            leaderId: this.replicaId,
-            leaderAddr: this.selfUrl,
-            prevLogIndex,
-            prevLogTerm,
-            entries,
-            leaderCommit: this.commitIndex,
-          };
-
-          const result = await this.rpcClient.appendEntries(peer, args);
-          if (result.term > this.currentTerm) {
-            this.becomeFollower(result.term);
-            return { peer, success: false, stepDown: true };
-          }
-          if (result.success) {
-            this.nextIndex.set(peer, entry.index + 1);
-            this.matchIndex.set(peer, entry.index);
-            return { peer, success: true };
-          } else {
-            const fromIndex = Math.max(1, result.currentLogLength + 1);
-            this.nextIndex.set(peer, fromIndex);
-            await this.syncCommittedEntries(peer, fromIndex);
-            return { peer, success: false };
-          }
-        }),
-      );
+      await Promise.allSettled(this.peers.map((peer) => this.driveReplication(peer)));
 
       if (this.state !== NodeState.Leader) {
         return { success: false, leaderHint: this.leaderAddr ?? undefined };
       }
 
       ackCount = 1;
-      for (const r of results) {
-        if (r.status === 'fulfilled' && r.value.success) ackCount++;
+      for (const peer of this.peers) {
+        if ((this.matchIndex.get(peer) ?? 0) >= entry.index) ackCount++;
       }
 
       if (ackCount >= majority) break;
