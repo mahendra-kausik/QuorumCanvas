@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientMessage, ServerMessage } from '../types';
-import { WS_URL, RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY } from '../constants';
+import { WS_URL, AUTH_TOKEN, RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY } from '../constants';
 import { logConnection, logDisconnection } from '../utils/logger';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
@@ -34,7 +34,8 @@ export function useWebSocket({ boardId, userId, onMessage }: UseWebSocketOptions
     }
 
     setStatus('connecting');
-    const url = `${WS_URL}?boardId=${encodeURIComponent(boardId)}&userId=${encodeURIComponent(userId)}`;
+    const tokenParam = AUTH_TOKEN ? `&token=${encodeURIComponent(AUTH_TOKEN)}` : '';
+    const url = `${WS_URL}?boardId=${encodeURIComponent(boardId)}&userId=${encodeURIComponent(userId)}${tokenParam}`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

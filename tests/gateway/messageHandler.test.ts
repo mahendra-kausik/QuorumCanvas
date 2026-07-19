@@ -31,12 +31,13 @@ describe('MessageHandler', () => {
   let bm: BoardManager;
   let handler: MessageHandler;
   let ws: WebSocket;
-  const connInfo = { boardId: 'board-1', userId: 'user-1' };
+  let connInfo: { boardId: string; userId: string; strokeCount: number; windowStart: number };
 
   beforeEach(() => {
     bm = new BoardManager();
     handler = new MessageHandler(bm, new LocalRaftClient(bm));
     ws = mockWs();
+    connInfo = { boardId: 'board-1', userId: 'user-1', strokeCount: 0, windowStart: Date.now() };
   });
 
   it('sends error on invalid JSON', async () => {
@@ -104,7 +105,43 @@ describe('MessageHandler', () => {
 
   it('handles stroke with missing data', async () => {
     await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke: null }), connInfo);
-    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'error', message: 'Invalid stroke data' }));
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'error', message: 'Stroke must be an object' }));
+  });
+
+  it('rejects a stroke whose boardId/userId does not match the connection (identity forgery)', async () => {
+    const stroke = makeStroke({ boardId: 'other-board' });
+    await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke }), connInfo);
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'error',
+      message: 'Stroke boardId/userId must match connection',
+    }));
+    expect(bm.getStrokes('board-1')).toHaveLength(0);
+  });
+
+  it('rejects an oversized stroke (too many points)', async () => {
+    const stroke = makeStroke({ points: Array.from({ length: 2001 }, () => [0, 0] as [number, number]) });
+    await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke }), connInfo);
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'error', message: 'Invalid stroke points' }));
+    expect(bm.getStrokes('board-1')).toHaveLength(0);
+  });
+
+  it('rate-limits strokes beyond the per-window cap', async () => {
+    for (let i = 0; i < 60; i++) {
+      await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke: makeStroke({ id: `s${i}` }) }), connInfo);
+    }
+    (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+    const overflow = makeStroke({ id: 's-overflow' });
+    await handler.handleMessage(ws, JSON.stringify({ type: 'stroke', stroke: overflow }), connInfo);
+
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'error',
+      message: 'Rate limit exceeded',
+      code: 'RATE_LIMITED',
+      strokeId: 's-overflow',
+      retryable: true,
+    }));
+    expect(bm.getStrokes('board-1')).toHaveLength(60); // overflow not submitted
   });
 
   it('returns structured error on RAFT write failure', async () => {

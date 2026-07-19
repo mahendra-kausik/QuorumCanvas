@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
-import { GATEWAY_HTTP_URL } from '../constants';
+import { GATEWAY_HTTP_URL, AUTH_TOKEN } from '../constants';
 
 interface ReplicaClusterStatus {
   peer: string;
@@ -34,7 +34,9 @@ export function Dashboard() {
 
     const fetchStatus = async () => {
       try {
-        const response = await fetch(`${GATEWAY_HTTP_URL}/cluster-status`);
+        const response = await fetch(`${GATEWAY_HTTP_URL}/cluster-status`, {
+          headers: AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {},
+        });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }

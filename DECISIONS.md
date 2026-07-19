@@ -18,6 +18,49 @@
 
 ---
 
+### D17 — Gateway-only auth boundary, shared bearer token, identity-bound stroke validation
+- Date: 2026-07-19
+- Context: L6 needs to close the public write path: no auth on gateway WS/HTTP, CORS wide open
+  (`*`), and stroke validation only checked `stroke.id` truthy — a stroke could claim any
+  `boardId`/`userId` regardless of the connection that sent it, and nothing capped payload size
+  or write rate. Two open choices: where to enforce auth (gateway only vs. also on replica RPC),
+  and what "ready" behavior should be when `AUTH_TOKEN` is unset (open vs. fail-closed).
+- Decision: enforce auth **at the gateway only** — in the L7 deployment topology only the
+  gateway port is public; replicas sit on the internal Docker/VM network, so network isolation
+  is their boundary. A single shared bearer token (`AUTH_TOKEN`) gates both the WS handshake
+  (`?token=` query param — browsers can't set custom headers on `WebSocket`) and HTTP endpoints
+  (`Authorization: Bearer` header on `/cluster-status`; `/health` stays open for liveness
+  probes). Compared with `crypto.timingSafeEqual` (length-guarded first, since it throws on a
+  length mismatch) to avoid a timing oracle. Auth is **active only when `AUTH_TOKEN` is set** —
+  unset means open (local dev keeps working with zero config; the deploy sets the token).
+  Per-board authorization is **identity binding, not ACLs**: with no account model, a stroke's
+  `boardId`/`userId` must equal the authenticated connection's, closing cross-board/identity
+  forgery (a connection joined to board A could otherwise submit a write claiming board B or
+  another user). Stroke shape/bounds are validated (hex color, finite width, points array
+  capped at 2000, finite timestamp) and a fixed-window per-connection rate limit
+  (60 strokes/sec) rejects overflow before it ever reaches Raft. CORS moved from `*` to an
+  origin allowlist (`ALLOWED_ORIGINS`, echoed + `Vary: Origin`), with `*` still available as an
+  explicit opt-out.
+- Why: no user-account system exists in this project, so a single shared token is the correct
+  minimal admission control — JWT would need an issuer/login story that doesn't exist yet. Hand-
+  rolling validation/rate-limit matches the project's existing hand-roll ethos (WAL, Raft RPCs,
+  Prometheus text, D16) and the actual surface is small. Gateway-only auth keeps the diff
+  minimal and matches the real public attack surface; extending the token to replica RPC would
+  add config plumbing to a boundary that's already closed by network isolation.
+- Alternatives considered: JWT (rejected, no login story to justify it); per-replica auth too
+  (rejected — replicas aren't publicly reachable in the L7 topology, so it adds surface without
+  closing a real gap); fail-closed when `AUTH_TOKEN` unset (rejected — breaks tokenless local
+  dev and the existing test suite for no safety gain in a dev-only context).
+- Tradeoffs / risks: `VITE_AUTH_TOKEN` is baked into the public frontend JS bundle at build
+  time, so it is **coarse admission control** (blocks non-browser/automated abuse, enforces the
+  auth mechanism) — **not** a per-user secret; anyone who inspects the bundle can extract it.
+  Genuine per-user auth needs real accounts, explicitly out of scope. The rate limit is a
+  fixed-window per-connection counter (`ponytail`-simple) — a client can burst up to 2x the
+  configured rate across a window boundary; a sliding window is the upgrade path if that
+  matters at scale.
+
+---
+
 ### D16 — Hand-rolled Prometheus exposition + joined-cluster readiness definition
 - Date: 2026-07-19
 - Context: L5 needs `/metrics` (state, currentTerm, commitIndex, log length, elections started,

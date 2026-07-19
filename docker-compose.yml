@@ -97,6 +97,10 @@ services:
     environment:
       PORT: "8080"
       RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
+      # L6: demo-only shared token (non-secret, fine in git for local compose). Real deploy
+      # secret lives in the platform env store (CLAUDE.md §4), never committed.
+      AUTH_TOKEN: "dev-demo-token"
+      ALLOWED_ORIGINS: "http://localhost:5173"
     networks:
       - raft-net
     depends_on:
@@ -123,6 +127,7 @@ services:
       CHOKIDAR_USEPOLLING: "true"
       VITE_WS_URL: "ws://localhost:8080/ws"
       VITE_GATEWAY_HTTP_URL: "http://localhost:8080"
+      VITE_AUTH_TOKEN: "dev-demo-token"
     volumes:
       - ./frontend:/app
       - /app/node_modules

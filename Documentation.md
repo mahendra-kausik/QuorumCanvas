@@ -14,6 +14,32 @@
   - Replica: `POST /request-vote`, `POST /append-entries`, `POST /heartbeat`, `POST /sync-log`, `POST /client-write`, `GET /health`, `GET /status`, `GET /board-state`.
 - Configuration:
   - `RAFT_PEERS`, `REPLICA_ID`, `PORT`, `PEERS`, `MAX_USERS_PER_BOARD`, `VITE_WS_URL`, `VITE_GATEWAY_HTTP_URL`.
+  - `AUTH_TOKEN`, `ALLOWED_ORIGINS`, `VITE_AUTH_TOKEN` (L6 — see Security section below).
+
+## Security (L6)
+- What it does:
+  - Gates the gateway's public WS/HTTP surface with a shared bearer token; validates and rate-
+    limits every stroke write; restricts CORS to an allowlist. Replicas are **not** separately
+    authenticated — they're protected by network isolation (only the gateway port is public in
+    the deployed topology).
+- How it works:
+  - WS: client passes `?token=` on the `/ws` URL (browsers can't set custom headers on
+    `WebSocket`); a mismatch closes the connection `1008 Unauthorized`.
+  - HTTP: `/cluster-status` requires `Authorization: Bearer <AUTH_TOKEN>` (401 without it);
+    `/health` stays open for liveness probes.
+  - Auth is **active only when `AUTH_TOKEN` is set** — unset means open (local dev needs no
+    config).
+  - Every incoming stroke is validated (`gateway/src/security.ts`): shape/bounds (hex color,
+    finite width, ≤2000 points, finite timestamp), and **identity binding** — `boardId`/
+    `userId` on the stroke must match the authenticated connection's, closing cross-board/
+    identity forgery. A fixed-window per-connection rate limit (60 strokes/sec default) rejects
+    overflow before it reaches Raft.
+- Caveat: `VITE_AUTH_TOKEN` ships in the public frontend bundle — coarse admission control
+  (blocks non-browser/automated abuse), not a per-user secret. No account model exists; real
+  per-user auth is out of scope. See `DECISIONS.md` D17.
+- Configuration:
+  - `AUTH_TOKEN` (gateway secret, unset = auth disabled), `ALLOWED_ORIGINS` (comma-separated,
+    default `http://localhost:5173`), `VITE_AUTH_TOKEN` (frontend, must match `AUTH_TOKEN`).
 
 ## Cluster Diagram
 ```mermaid

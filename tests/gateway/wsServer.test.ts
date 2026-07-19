@@ -67,6 +67,49 @@ describe('WebSocket Server', () => {
     await waitForClose(ws);
   });
 
+  // Assigning `undefined` to process.env.X coerces to the string "undefined" in Node (env vars
+  // are always strings) — restore with `delete` when there was no prior value, or auth stays
+  // "enabled" (with token "undefined") for every test that runs after this one.
+  function restoreAuthToken(prev: string | undefined): void {
+    if (prev === undefined) {
+      delete process.env.AUTH_TOKEN;
+    } else {
+      process.env.AUTH_TOKEN = prev;
+    }
+  }
+
+  it('rejects a connection with a wrong/missing token when AUTH_TOKEN is set (L6)', async () => {
+    const prev = process.env.AUTH_TOKEN;
+    process.env.AUTH_TOKEN = 'secret';
+    try {
+      await startServer();
+      const ws = new WebSocket(`ws://localhost:${port}/ws?boardId=board-1&userId=user-1`);
+      clients.push(ws);
+      const closeEvent = await new Promise<{ code: number }>((resolve) => {
+        ws.once('close', (code) => resolve({ code }));
+      });
+      expect(closeEvent.code).toBe(1008);
+    } finally {
+      restoreAuthToken(prev);
+    }
+  });
+
+  it('accepts a connection with the correct token when AUTH_TOKEN is set (L6)', async () => {
+    const prev = process.env.AUTH_TOKEN;
+    process.env.AUTH_TOKEN = 'secret';
+    try {
+      await startServer();
+      const ws = new WebSocket(`ws://localhost:${port}/ws?boardId=board-1&userId=user-1&token=secret`);
+      clients.push(ws);
+      await waitForOpen(ws);
+      ws.send(JSON.stringify({ type: 'join', boardId: 'board-1', userId: 'user-1' }));
+      const msg = JSON.parse(await waitForMessage(ws));
+      expect(msg.type).toBe('join_ack');
+    } finally {
+      restoreAuthToken(prev);
+    }
+  });
+
   it('accepts connection and handles join flow', async () => {
     await startServer();
     const ws = connect('board-1', 'user-1');

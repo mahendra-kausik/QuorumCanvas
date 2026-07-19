@@ -2,6 +2,9 @@ import type WebSocket from 'ws';
 import type { ClientMessage, Stroke } from './types.js';
 import type { BoardManager } from './boardManager.js';
 import type { RaftClient } from './raftClient.js';
+import type { ConnectionInfo } from './wsServer.js';
+import { validateStroke } from './security.js';
+import { GATEWAY_SECURITY } from './config.js';
 
 export class MessageHandler {
   constructor(
@@ -9,7 +12,7 @@ export class MessageHandler {
     private raftClient: RaftClient,
   ) {}
 
-  async handleMessage(ws: WebSocket, data: string, connectionInfo: { boardId: string; userId: string }): Promise<void> {
+  async handleMessage(ws: WebSocket, data: string, connectionInfo: ConnectionInfo): Promise<void> {
     let message: ClientMessage;
     try {
       message = JSON.parse(data) as ClientMessage;
@@ -55,9 +58,29 @@ export class MessageHandler {
     }
   }
 
-  private async handleStroke(ws: WebSocket, stroke: Stroke, connectionInfo: { boardId: string; userId: string }): Promise<void> {
-    if (!stroke || !stroke.id) {
-      this.boardManager.sendTo(ws, { type: 'error', message: 'Invalid stroke data' });
+  private async handleStroke(ws: WebSocket, stroke: Stroke, connectionInfo: ConnectionInfo): Promise<void> {
+    const validation = validateStroke(stroke, connectionInfo);
+    if (!validation.ok) {
+      this.boardManager.sendTo(ws, { type: 'error', message: validation.reason });
+      return;
+    }
+
+    // L6: fixed-window per-connection rate limit — resets each window, rejects over the cap
+    // before the write ever reaches Raft.
+    const now = Date.now();
+    if (now - connectionInfo.windowStart >= GATEWAY_SECURITY.rateLimitWindowMs) {
+      connectionInfo.windowStart = now;
+      connectionInfo.strokeCount = 0;
+    }
+    connectionInfo.strokeCount += 1;
+    if (connectionInfo.strokeCount > GATEWAY_SECURITY.strokeRateLimitPerSec) {
+      this.boardManager.sendTo(ws, {
+        type: 'error',
+        message: 'Rate limit exceeded',
+        code: 'RATE_LIMITED',
+        strokeId: stroke.id,
+        retryable: true,
+      });
       return;
     }
 

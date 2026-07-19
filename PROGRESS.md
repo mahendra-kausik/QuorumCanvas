@@ -3,7 +3,50 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-19 — Layer 5 (Observability & lifecycle) COMPLETE.** Gate passed (evidence below).
+- **2026-07-19 — Layer 6 (Security hardening) COMPLETE.** Gate passed (evidence below).
+  - **Gateway-only auth boundary** (D17): new `gateway/src/security.ts` —
+    `tokensMatch(provided, expected)` (constant-time via `crypto.timingSafeEqual`, length-
+    guarded first; `expected === null` means auth disabled) and `validateStroke(stroke, conn)`
+    (shape/bounds + identity binding). `wsServer.ts`'s connection handler reads `?token=` from
+    the WS URL and closes (`1008 Unauthorized`) before any other check when it doesn't match
+    `AUTH_TOKEN`; `index.ts` requires `Authorization: Bearer <token>` on `/cluster-status` (401
+    without it), `/health` stays open (liveness). `gateway/src/index.ts` refactored into an
+    exported `createGatewayServer(config)` factory (mirrors replica's `createApp`) so the HTTP
+    surface is unit-testable without binding a real port at import time.
+  - **Identity-bound stroke validation** (D17): `messageHandler.ts`'s `handleStroke` now calls
+    `validateStroke`, which rejects a stroke whose `boardId`/`userId` doesn't match the sending
+    connection — closes cross-board/identity forgery — plus shape/bounds checks (hex color,
+    finite width, `points` capped at `maxStrokePoints=2000`, finite timestamp, valid `action`).
+    Rejected strokes never reach `raftClient.submitStroke`.
+  - **Per-connection rate limit**: fixed-window counter on `ConnectionInfo`
+    (`strokeCount`/`windowStart`), 60 strokes/sec default (`GATEWAY_SECURITY` in `config.ts`);
+    overflow gets a `RATE_LIMITED` error and is dropped before Raft, window resets on roll.
+  - **CORS allowlist**: `index.ts`'s `writeCors` echoes `Origin` only when it's in
+    `ALLOWED_ORIGINS` (`Vary: Origin`), or when the list explicitly opts out with `*` — replaces
+    the previous blanket `Access-Control-Allow-Origin: *`.
+  - **WS frame cap**: `WebSocketServer` now takes `maxPayload: 64KB` (`maxWsPayloadBytes`).
+  - **Frontend**: `VITE_AUTH_TOKEN` → `constants.ts` `AUTH_TOKEN`; `useWebSocket.ts` appends
+    `&token=` to the WS URL; `Dashboard.tsx` sends `Authorization: Bearer` on `/cluster-status`.
+    Documented caveat: this token is baked into the public JS bundle — coarse admission control,
+    not a per-user secret (no account model exists; named as out of scope).
+  - **Gate evidence:** `tsc --noEmit` clean (gateway + replica + frontend). `npm test` green —
+    gateway **65/65** (42 prior + 23 new: `security.test.ts` for `tokensMatch`/`validateStroke`
+    incl. timing-safe length-mismatch and identity-forgery cases, `httpServer.test.ts` for
+    `/cluster-status` 401/200/open-when-unset and CORS allowlist echo, `wsServer.test.ts` +2 for
+    WS reject (`1008`) / accept-with-token, `messageHandler.test.ts` +3 for identity-forgery
+    rejection, oversized-points rejection, and rate-limit overflow **[the property this layer
+    exists to add]**), replica **105/105**, frontend **41/41** unaffected. Docker e2e
+    (`docker compose up`, `AUTH_TOKEN=dev-demo-token` in compose, all 5 containers healthy):
+    `GET /health` → 200 with no token; `GET /cluster-status` → **401** with no/wrong bearer,
+    **200** with the correct one. WS connect with no/wrong `token` → accepted at the TCP/HTTP
+    upgrade level then **closed 1008** immediately (matches the existing `boardId`/`userId`
+    rejection pattern in this codebase); WS connect with the correct token → `join_ack`. A
+    well-formed stroke committed normally (leader `commitIndex` advanced); a stroke claiming a
+    **different `boardId`** than the connection was rejected client-side with `"Stroke
+    boardId/userId must match connection"` and never reached Raft (commitIndex unchanged by
+    it). A burst of **65** strokes from one connection: **60 accepted, exactly 5**
+    `RATE_LIMITED` (**RESULT: PASS**).
+- Prior: Layer 5 (Observability & lifecycle) COMPLETE. Gate passed (evidence below).
   - **Prometheus `/metrics`** (D16): new `replica/src/metrics.ts`, hand-rolled text exposition
     (no new dependency). Gauges (`raft_state`, `raft_current_term`, `raft_commit_index`,
     `raft_last_applied`, `raft_log_length`) read live from the existing `RaftNode.getStatus()`
@@ -187,9 +230,11 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 6 — Security hardening** (awaiting approval per PRIME DIRECTIVE): auth on gateway
-  WS + HTTP (`AUTH_TOKEN`), per-board authz, input validation + size caps on strokes,
-  per-connection rate limit, tighten CORS from `*`, TLS terminated at the platform edge.
+- **Layer 7 — Deployment (Oracle Cloud Always Free)** (awaiting approval per PRIME DIRECTIVE):
+  provision always-free ARM VM(s), persistent block volume per replica, production multi-stage
+  images (non-root), scripted bring-up, frontend on Vercel/Cloudflare Pages, TLS terminated at
+  the platform edge (last item of L6's stated scope, deferred here since it's a deploy-platform
+  concern rather than application code).
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
