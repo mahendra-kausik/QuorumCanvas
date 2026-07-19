@@ -2,6 +2,7 @@ import { RaftLog } from './raftLog.js';
 import { MemoryPersistence, type Persistence } from './persistence.js';
 import { log } from './logger.js';
 import { RAFT_TIMING } from './config.js';
+import { recordElectionStarted, recordLeadershipChange, observeWriteLatency } from './metrics.js';
 import {
   NodeState,
   type RpcClient,
@@ -132,6 +133,7 @@ export class RaftNode {
     this.votedFor = this.replicaId;
     this.leaderId = null;
     this.persistState();
+    recordElectionStarted();
     log('info', 'become_candidate', { term: this.currentTerm });
   }
 
@@ -139,6 +141,7 @@ export class RaftNode {
     this.state = NodeState.Leader;
     this.leaderId = this.replicaId;
     this.leaderAddr = this.selfUrl;
+    recordLeadershipChange();
     log('info', 'become_leader', { term: this.currentTerm });
 
     // Initialize leader volatile state
@@ -680,6 +683,7 @@ export class RaftNode {
       return { success: false, leaderHint: this.leaderAddr ?? undefined };
     }
 
+    const writeStartMs = Date.now();
     const entry: LogEntry = {
       index: this.log.getLastIndex() + 1,
       term: this.currentTerm,
@@ -716,6 +720,7 @@ export class RaftNode {
 
     if (ackCount >= majority) {
       this.updateCommitIndex();
+      observeWriteLatency(Date.now() - writeStartMs);
       return { success: true };
     }
 
@@ -853,6 +858,13 @@ export class RaftNode {
 
   getStrokes(boardId: string): Stroke[] {
     return this.boardStrokes.get(boardId) ?? [];
+  }
+
+  // Readiness (L5) — "joined a functioning cluster", not a replication-lag threshold: lastApplied
+  // catches up to commitIndex synchronously on every commit (applyCommitted), so a lag-based
+  // definition would trivially always read 0 and add nothing.
+  isReady(): boolean {
+    return this.state === NodeState.Leader || (this.state === NodeState.Follower && this.leaderId !== null);
   }
 
   getStatus(): ReplicaStatus {

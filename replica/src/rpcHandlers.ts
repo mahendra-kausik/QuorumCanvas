@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { RaftNode } from './raftNode.js';
+import { renderMetrics } from './metrics.js';
 
 export function createRpcRouter(raftNode: RaftNode): Router {
   const router = Router();
@@ -36,6 +37,10 @@ export function createRpcRouter(raftNode: RaftNode): Router {
 
   router.get('/status', (_req, res) => {
     res.json(raftNode.getStatus());
+  });
+
+  router.get('/metrics', (_req, res) => {
+    res.type('text/plain').send(renderMetrics(raftNode.getStatus()));
   });
 
   router.get('/board-state', async (req, res) => {

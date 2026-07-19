@@ -35,6 +35,15 @@ export function createApp(config: ReplicaConfig, deps?: { rpcClient?: RpcClient;
     res.json({ status: 'ok', replicaId: config.replicaId });
   });
 
+  // Liveness (/health) vs readiness (/ready): /health only proves the process is up;
+  // /ready proves this node has joined a functioning cluster (leader, or a follower that has
+  // heard from one) — see RaftNode.isReady() for the exact definition.
+  app.get('/ready', (_req, res) => {
+    const status = raftNode.getStatus();
+    const ready = raftNode.isReady();
+    res.status(ready ? 200 : 503).json({ ready, state: status.state, leaderId: status.leaderId });
+  });
+
   app.use(createRpcRouter(raftNode));
 
   return { app, raftNode };
@@ -47,11 +56,22 @@ if (isMainModule) {
   setReplicaId(config.replicaId);
 
   const { app, raftNode } = createApp(config);
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     log('info', 'server_start', { port: config.port, peers: config.peers });
     raftNode.start();
 
     // Attempt catch-up after a short delay to allow cluster to stabilize
     setTimeout(() => raftNode.requestCatchUp(), RAFT_TIMING.catchUpDelayMs);
   });
+
+  // Graceful shutdown (L5): stop the Raft timers so no election/heartbeat fires mid-teardown,
+  // then close the HTTP server. WAL entries and state.json are fsynced on every mutation (L1),
+  // so there is no in-memory buffer to flush here — persistState()/log.append() already did it.
+  const shutdown = (signal: string) => {
+    log('info', 'shutdown', { signal });
+    raftNode.stop();
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

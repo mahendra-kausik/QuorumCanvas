@@ -18,6 +18,35 @@
 
 ---
 
+### D16 — Hand-rolled Prometheus exposition + joined-cluster readiness definition
+- Date: 2026-07-19
+- Context: L5 needs `/metrics` (state, currentTerm, commitIndex, log length, elections started,
+  leadership changes, write latency) and a `/ready` endpoint distinct from `/health`. Two open
+  choices: whether to pull in `prom-client`, and what "ready" means for a Raft node (no natural
+  replication-lag signal exists here — `lastApplied` catches up to `commitIndex` synchronously
+  inside `applyCommitted()` on every commit, so a lag-based readiness gate would always read 0).
+- Decision: hand-rolled `replica/src/metrics.ts` emitting Prometheus text format directly — no
+  new dependency. Only 3 series need in-process accumulation (`electionsStarted`,
+  `leadershipChanges` counters; a fixed-bucket `[5,10,25,50,100,250,500,1000]`ms write-latency
+  histogram); every gauge (`raft_state`, `raft_current_term`, `raft_commit_index`,
+  `raft_last_applied`, `raft_log_length`) is read live from the existing `RaftNode.getStatus()`
+  at scrape time, not shadow-tracked. `RaftNode.isReady()` defines readiness as "joined a
+  functioning cluster": `state === Leader` OR (`state === Follower` AND `leaderId !== null`) —
+  a candidate, or a follower that has never heard from a leader, is not ready. `/health` stays
+  liveness-only (process up); `/ready` is the new joined-cluster gate, 503 when false.
+- Why: the user chose hand-rolled over `prom-client` to match the project's hand-roll-the-core
+  ethos (WAL, Raft RPCs) and because the actual metric surface is tiny — a real dependency buys
+  correct histogram math we don't need at 3 series and default Node process metrics (CPU/mem/GC)
+  that PROJECT_PLAN §L5 doesn't ask for. Joined-cluster (not lag-based) readiness is the only
+  definition that's actually meaningful given L4's synchronous apply.
+- Alternatives considered: `prom-client` (rejected — see above); readiness = `lastApplied ===
+  commitIndex` (rejected — always true by construction post-L4, would not gate anything real).
+- Tradeoffs / risks: hand-rolled exposition format must be kept in sync by hand if new metrics
+  are added later (no library to enforce the format); no default process metrics (CPU/mem/GC) —
+  acceptable, out of scope for L5's Raft-specific ask.
+
+---
+
 ### D15 — Single guarded replication driver per peer + AppendEntries batch cap
 - Date: 2026-07-19
 - Context: `raftNode.ts` had **three** independent replication call sites hitting the same peer —

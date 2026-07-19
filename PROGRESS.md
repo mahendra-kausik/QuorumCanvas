@@ -3,7 +3,40 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-19 — Layer 4 (Backpressure & single replication driver) COMPLETE.** Gate passed
+- **2026-07-19 — Layer 5 (Observability & lifecycle) COMPLETE.** Gate passed (evidence below).
+  - **Prometheus `/metrics`** (D16): new `replica/src/metrics.ts`, hand-rolled text exposition
+    (no new dependency). Gauges (`raft_state`, `raft_current_term`, `raft_commit_index`,
+    `raft_last_applied`, `raft_log_length`) read live from the existing `RaftNode.getStatus()`
+    at scrape time; two counters (`raft_elections_started_total`, incremented in
+    `becomeCandidate`; `raft_leadership_changes_total`, incremented in `becomeLeader`); one
+    fixed-bucket (`5/10/25/50/100/250/500/1000`ms) `raft_write_latency_ms` histogram, observed
+    in `handleClientWrite` on a successful majority commit. Wired via a new `/metrics` route in
+    `rpcHandlers.ts`.
+  - **`/ready` vs `/health`** (D16): `/health` unchanged (liveness — process up). New
+    `RaftNode.isReady()` = `state === Leader` OR (`state === Follower` AND `leaderId !== null`)
+    — "joined a functioning cluster", not a replication-lag threshold (L4's synchronous
+    `applyCommitted()` means `lastApplied` always equals `commitIndex` between commits, so a
+    lag-based definition would never gate anything). New `GET /ready` in `index.ts` → 503 when
+    not ready, 200 + `{ready, state, leaderId}` otherwise.
+  - **Graceful shutdown**: `index.ts` keeps the `http.Server` handle from `app.listen`; SIGTERM
+    and SIGINT handlers call `raftNode.stop()` (halts election + heartbeat timers) then
+    `server.close(() => process.exit(0))`. No flush step needed — L1's WAL/`state.json` are
+    fsynced on every mutation already, so there is no in-memory buffer to lose.
+  - **Gate evidence:** `tsc --noEmit` clean (replica). `npm test` green — replica **105/105**
+    (101 prior + 4 new in `tests/replica/metrics.test.ts`: `/metrics` exposes all gauge/counter/
+    histogram names, a latency observation lands in every bucket ≥ its value and bumps
+    sum/count, `/ready` returns 503 for a fresh leaderless follower and 200 once the node
+    becomes leader **[the property this layer exists to add]**), gateway **42/42**, frontend
+    **41/41** unaffected. Docker e2e (`docker compose up`, 3 replicas + gateway + frontend all
+    healthy): `curl replica2:3002/metrics` (the elected leader) returned scrapeable Prometheus
+    text; a committed write (`POST /client-write`) advanced `raft_commit_index` 0→1 and recorded
+    34ms in the latency histogram (`_count`=1, `_sum`=34, `bucket{le="1000"}`=1). `docker stop`
+    (SIGTERM) the leader → logs show clean `shutdown`→`node_stop` (no forced kill needed);
+    replica1 won a new election (term 5) — its `/metrics` showed `raft_state`→2 and
+    `raft_leadership_changes_total`→1 with `raft_current_term`→5, `commitIndex=1` preserved
+    (**no data lost**). `docker start` the stopped replica2 → rejoined at term 5 (not reset to
+    0), caught up to `commitIndex=1`, `/ready` returned 200 (**RESULT: PASS**).
+- Prior: Layer 4 (Backpressure & single replication driver) COMPLETE. Gate passed
   (evidence below).
   - **Single guarded replication driver** (D15): the three previously-duplicated replication call
     sites (`sendHeartbeats`, `syncCommittedEntries`, `handleClientWrite`'s per-write loop) collapse
@@ -154,10 +187,9 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 5 — Observability & lifecycle** (awaiting approval per PRIME DIRECTIVE): structured
-  JSON logs (extend existing `logger`), Prometheus `/metrics` per replica (state, currentTerm,
-  commitIndex, log length, elections started, leadership changes, write latency histogram),
-  split `/health` (liveness) vs `/ready` (joined + caught up), graceful shutdown on SIGTERM.
+- **Layer 6 — Security hardening** (awaiting approval per PRIME DIRECTIVE): auth on gateway
+  WS + HTTP (`AUTH_TOKEN`), per-board authz, input validation + size caps on strokes,
+  per-connection rate limit, tighten CORS from `*`, TLS terminated at the platform edge.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
