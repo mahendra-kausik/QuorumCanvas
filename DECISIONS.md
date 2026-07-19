@@ -18,6 +18,60 @@
 
 ---
 
+### D18 — L7a deployment topology: single Oracle VM, named-volume prod compose, Cloudflare Tunnel edge, Vercel frontend
+- Date: 2026-07-19
+- Context: L7 needs the cluster running at a public URL on free-tier compute only
+  (CLAUDE.md §4). The existing `docker-compose.yml` is dev-only (source bind mounts, `npm run
+  dev`, debug ports, root user) — not something to expose to the internet as-is. Also: the
+  Vercel frontend is served over HTTPS, so a plain `http://`/`ws://` gateway would be
+  mixed-content blocked by the browser — the public entry point must terminate real TLS.
+  I (Claude) cannot sign up for Oracle (needs the user's card) or drive its console
+  (VM/volume/firewall provisioning), so this decision also covers **splitting the layer**
+  (CLAUDE.md §2.5): L7a = author + locally-verify every deploy artifact; L7b = the user runs
+  the actual Oracle/Cloudflare/Vercel bring-up from `DEPLOY.md`, with me troubleshooting.
+- Decision: (1) One Always-Free ARM VM (`VM.Standard.A1.Flex`, 2 OCPU/12GB) hosts all 3
+  replicas + gateway as containers — per `PROJECT_PLAN.md` §6 this is the only free tier with
+  real persistent disks for a stateful Raft cluster. (2) New `docker-compose.prod.yml`
+  (dev compose untouched, kept for local iteration): multi-stage, non-root Dockerfiles
+  (`npm ci` build stage → `npm ci --omit=dev` runtime stage, `USER node`), **named volumes**
+  per replica (`replica<N>-data:/app/instance`) instead of bind mounts so `DATA_DIR` survives
+  a VM reboot without depending on host filesystem layout, secrets/config sourced from a
+  gitignored `.env` (`.env.example` committed as the template). (3) Public HTTPS/WSS entry via
+  a `cloudflared` container (Cloudflare Tunnel, gated behind a `tunnel` compose profile so
+  local verification doesn't need a real Cloudflare account) — the gateway itself stays off
+  the VM's public interface entirely; only the tunnel is internet-reachable, sidestepping
+  Oracle's security-list/NSG configuration for inbound app ports. (4) Frontend deploys to
+  Vercel (zero-config Vite static build), pointed at the tunnel's HTTPS hostname.
+- Why: named volumes are the simplest way to decouple `DATA_DIR` persistence from the exact
+  bind-mount path chosen on an unknown VM, and Docker seeds a fresh named volume from the
+  image directory's contents/ownership on first mount — letting the image itself pre-create
+  `/app/instance` owned by the non-root `node` user (see below) rather than needing an
+  entrypoint chown script. Cloudflare Tunnel over Caddy+Let's-Encrypt: no domain purchase, no
+  inbound firewall rule to get right in Oracle's often-fiddly security-list UI, and it's free
+  with no VM-side cert renewal to babysit.
+- Alternatives considered: Caddy + a free DuckDNS subdomain (rejected — needs ports 80/443
+  opened in both Oracle's security list and the VM's iptables, plus a subdomain to manage;
+  more moving parts for the same outcome). systemd instead of compose for bring-up (rejected —
+  compose already exists and works; the plan explicitly allows either, no reason to add a
+  second orchestration mechanism). Fly.io (documented fallback only, per `PROJECT_PLAN.md` §6 —
+  free allowance is a small PAYG budget that may bill; use only if Oracle ARM capacity is
+  unavailable at signup).
+- Tradeoffs / risks: Cloudflare Tunnel is a third-party dependency in the request path (an
+  outage there takes the public cluster down even if the VM is healthy) — acceptable for a
+  free-tier resume project, named as a caveat. A single VM is still a single point of physical
+  failure for all 3 replicas (no cross-AZ/cross-VM fault tolerance) — Raft here defends
+  against *process*-level failure (crash, leader loss, network partition between containers),
+  not *host*-level failure; this matches the stated free-tier constraint, named honestly.
+  `.env`-based secrets mean the deploy step is manual (not templated infra-as-code) — acceptable
+  at this scale, revisit if the project ever needs multi-VM.
+- Discovered during local verification: a named volume mounted at a path the image doesn't
+  already own gets created root-owned, so the non-root (`USER node`) runtime container got
+  `EACCES` writing `state.json` on first boot. Fixed by adding `RUN mkdir -p /app/instance &&
+  chown node:node /app/instance` before `USER node` in the runtime stage — Docker copies that
+  ownership into the volume on its first mount.
+
+---
+
 ### D17 — Gateway-only auth boundary, shared bearer token, identity-bound stroke validation
 - Date: 2026-07-19
 - Context: L6 needs to close the public write path: no auth on gateway WS/HTTP, CORS wide open

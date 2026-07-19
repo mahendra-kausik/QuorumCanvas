@@ -4,6 +4,9 @@ dist
 .DS_Store
 logs
 
+# L7: real deploy secrets (AUTH_TOKEN, TUNNEL_TOKEN, ...) — .env.example is the committed template.
+.env
+
 # Per-replica instance/data dirs are runtime state (Docker bind-mount targets,
 # future L1 WAL/snapshot storage) — created on `docker compose up`, never source.
 replica1/

@@ -3,7 +3,53 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-19 — Layer 6 (Security hardening) COMPLETE.** Gate passed (evidence below).
+- **2026-07-19 — Layer 7a (Deployment artifacts) COMPLETE. Layer 7b (live Oracle bring-up)
+  is a manual next step — see below.** Gate passed for everything runnable without a real
+  cloud account (evidence below).
+  - **Split rationale** (D18): Oracle signup needs the user's card and console provisioning
+    (VM, block volume, security list) can't be done by me — split into L7a (author + locally
+    verify every deploy artifact, this entry) and L7b (user runs `DEPLOY.md` against the real
+    VM/Cloudflare/Vercel, with me troubleshooting).
+  - **Production images** (D18): `replica/Dockerfile`, `gateway/Dockerfile` now multi-stage —
+    build stage (`npm ci` + `tsc`) → slim runtime stage (`npm ci --omit=dev`, copies only
+    `dist/`, `USER node`). Runtime stage pre-creates `/app/instance` owned by `node` so a
+    named-volume mount doesn't land root-owned under the non-root user (bug caught during
+    local verify, see below).
+  - **`docker-compose.prod.yml`** (new, dev compose untouched): no source bind mounts/`npm run
+    dev`/debug ports; **named volumes** (`replica<N>-data`) for `DATA_DIR` so state survives a
+    VM reboot; `AUTH_TOKEN`/`ALLOWED_ORIGINS`/`TUNNEL_TOKEN` required from a gitignored `.env`
+    (`.env.example` committed as the template, `.env` added to `.gitignore`); `cloudflared`
+    service gated behind a `tunnel` compose profile — public HTTPS/WSS entry point without
+    exposing the gateway on the VM's public interface or fighting Oracle's security-list UI.
+  - **`scripts/deploy-up.sh`** (new): one-line wrapper — `docker compose -f
+    docker-compose.prod.yml --profile tunnel up -d --build`, with a `.env`-missing guard.
+  - **`DEPLOY.md`** (new runbook): the L7b steps — provision the Always-Free ARM VM, install
+    Docker, create the Cloudflare Tunnel + route it to `http://gateway:8080`, fill `.env`,
+    `deploy-up.sh`, deploy `frontend/` to Vercel pointed at the tunnel hostname, then verify
+    the L7 gate (public write, remote failover, reboot survival) against the real VM.
+  - **Gate evidence (L7a, local):** `docker compose -f docker-compose.prod.yml build` — all 4
+    prod images build. `up -d` (no tunnel profile) — 3 replicas + gateway all **healthy**;
+    `docker exec replica1 whoami` → **`node`** (non-root confirmed). Leader elected
+    (replica2, term 4). `POST /client-write` directly to the leader → `{"success":true}`,
+    `cluster-status` showed leader `commitIndex` 0→1. **Reboot/volume proof:** `docker
+    restart` replica1 → logs show clean `shutdown`(SIGTERM)→`node_stop`, then on boot
+    reloaded **`term=4`** (not reset to 0) and replayed the applied entry from the named
+    volume before rejoining; won re-election at term 5 after restart, and all 3 replicas
+    re-converged on `commitIndex=1` with identical state (**no data lost across a container
+    restart backed by a named volume, the reboot-survival property this layer needs**).
+    `npm test` green in all three services (replica 105/105, gateway 65/65, frontend 41/41 —
+    no app code changed, regression check only). `git status` confirmed no `.env`/secret
+    staged (**RESULT: PASS** for the locally-verifiable portion of the gate).
+  - **Bug caught during verify, not by static review:** a named volume mounted over a path the
+    image doesn't already own is created root-owned by Docker; the non-root runtime container
+    hit `EACCES` on `state.json` on first boot. Fixed in the Dockerfile (see above), logged in
+    D18.
+  - **L7b still open (needs the user, tracked as this layer's remaining step, not a new
+    layer):** provision the real Oracle VM, create the Cloudflare Tunnel, deploy the frontend
+    to Vercel, and verify the plan's actual stated gate — "cluster live at a public URL;
+    failover + catch-up demoable remotely; state survives a VM reboot" — against the live
+    infrastructure. `DEPLOY.md` has the exact steps.
+- Prior: Layer 6 (Security hardening) COMPLETE. Gate passed (evidence below).
   - **Gateway-only auth boundary** (D17): new `gateway/src/security.ts` —
     `tokensMatch(provided, expected)` (constant-time via `crypto.timingSafeEqual`, length-
     guarded first; `expected === null` means auth disabled) and `validateStroke(stroke, conn)`
@@ -230,11 +276,11 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 7 — Deployment (Oracle Cloud Always Free)** (awaiting approval per PRIME DIRECTIVE):
-  provision always-free ARM VM(s), persistent block volume per replica, production multi-stage
-  images (non-root), scripted bring-up, frontend on Vercel/Cloudflare Pages, TLS terminated at
-  the platform edge (last item of L6's stated scope, deferred here since it's a deploy-platform
-  concern rather than application code).
+- **Layer 7b — live Oracle bring-up** (user-driven, per `DEPLOY.md`; I troubleshoot): provision
+  the Always-Free ARM VM, stand up the Cloudflare Tunnel, deploy the frontend to Vercel, then
+  verify the real L7 gate (public URL, remote failover, reboot survival) against the live
+  cluster. Once that's confirmed, **Layer 8 — Proof & benchmarks** is next per
+  `PROJECT_PLAN.md`.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →

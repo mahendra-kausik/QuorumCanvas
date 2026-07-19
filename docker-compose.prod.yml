@@ -1,0 +1,128 @@
+services:
+  replica1:
+    build: ./replica
+    ports:
+      - "3001:3001"
+    volumes:
+      - replica1-data:/app/instance
+    environment:
+      REPLICA_ID: "replica1"
+      PORT: "3001"
+      PEERS: "http://replica2:3002,http://replica3:3003"
+      DATA_DIR: "/app/instance"
+      SNAPSHOT_THRESHOLD: "${SNAPSHOT_THRESHOLD:-500}"
+    networks:
+      - raft-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  replica2:
+    build: ./replica
+    ports:
+      - "3002:3002"
+    volumes:
+      - replica2-data:/app/instance
+    environment:
+      REPLICA_ID: "replica2"
+      PORT: "3002"
+      PEERS: "http://replica1:3001,http://replica3:3003"
+      DATA_DIR: "/app/instance"
+      SNAPSHOT_THRESHOLD: "${SNAPSHOT_THRESHOLD:-500}"
+    networks:
+      - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  replica3:
+    build: ./replica
+    ports:
+      - "3003:3003"
+    volumes:
+      - replica3-data:/app/instance
+    environment:
+      REPLICA_ID: "replica3"
+      PORT: "3003"
+      PEERS: "http://replica1:3001,http://replica2:3002"
+      DATA_DIR: "/app/instance"
+      SNAPSHOT_THRESHOLD: "${SNAPSHOT_THRESHOLD:-500}"
+    networks:
+      - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3003/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      RAFT_PEERS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
+      # L6: the one real secret this project has — set in .env, never committed (CLAUDE.md §4).
+      AUTH_TOKEN: "${AUTH_TOKEN:?set AUTH_TOKEN in .env}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS in .env, e.g. the Vercel origin}"
+    networks:
+      - raft-net
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+      replica3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # L7: public HTTPS/WSS entry point. The gateway itself stays on the internal raft-net;
+  # cloudflared is the only piece of this stack exposed to the internet. Disabled by default
+  # (profile-gated) so `docker compose up` with no profile still exercises the whole cluster
+  # locally without a real Cloudflare account/token — see DEPLOY.md for L7b bring-up.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env — see DEPLOY.md}"
+    networks:
+      - raft-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - tunnel
+
+networks:
+  raft-net:
+    driver: bridge
+
+volumes:
+  replica1-data:
+  replica2-data:
+  replica3-data:
