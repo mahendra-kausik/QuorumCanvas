@@ -18,6 +18,37 @@
 
 ---
 
+### D25 — Two bugs in `bench.mjs` itself, caught only by running it against the live GCP VM
+- Date: 2026-07-21
+- Context: the `load` command worked first try, both locally and on the VM. `failover` passed
+  locally but broke twice against the real VM (over `gcloud compute ssh`, which relays a pty via
+  `plink.exe` on Windows) — neither issue showed up locally or in any static read of the code.
+  1. `execSync(..., { stdio: 'inherit' })` for `docker compose stop/start` reported a nonzero
+     exit even though the command visibly succeeded (container did stop) — the SSH-relayed pty
+     apparently mishandled `docker compose`'s TTY progress-spinner output enough to make Node see
+     a bad exit code. 2. After fixing #1, `failover --compose-file docker-compose.prod.yml`
+     failed with `open /home/.../true: no such file or directory` — `parseArgs` only implemented
+     `--flag=value`, so the space-separated `--compose-file docker-compose.prod.yml` left
+     `compose-file` set to the boolean `true` (the "flag present, no value" default), which then
+     stringified to the literal filename `"true"` and got handed to `docker compose -f`.
+  2 is the more interesting one for interview purposes: it's a classic "worked in every test I
+  wrote because I always typed `=`" gap — nothing in the code was wrong until it met a caller
+  (me, at the actual CLI) using the other common flag syntax.
+- Decision: (1) replaced `stdio: 'inherit'` with piped stdio + explicit stdout/stderr surfacing
+  on error (`runCompose` helper) for both the stop and start calls. (2) `parseArgs` now accepts
+  `--flag value` (consumes the next arg unless it also starts with `--`) as well as
+  `--flag=value`. Re-ran `failover` against the VM after both fixes — correct
+  `oldLeader`/`newLeader`/`failoverMs`, cluster left healthy.
+- Why: piped stdio removes the pty as a variable entirely (script behavior no longer depends on
+  how the parent terminal renders progress bars); supporting both flag syntaxes is what every
+  CLI user expects and was the actual gap, not a docker/SSH problem.
+- Tradeoffs / risks: none — piped stdio means `docker compose`'s own progress output isn't shown
+  live during the stop/start, only printed if something fails, which is the right tradeoff for a
+  script recording data, not a human watching a terminal.
+- Supersedes: none.
+
+---
+
 ### D24 — Dev `docker-compose.yml` broken by L7a's multi-stage Dockerfile rewrite; fixed with `target: build`
 - Date: 2026-07-21
 - Context: bringing the local cluster up to run L8's benchmark harness, `docker compose up

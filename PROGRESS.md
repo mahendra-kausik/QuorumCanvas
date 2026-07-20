@@ -3,6 +3,56 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
+- **2026-07-21 — Layer 8 (Proof & benchmarks) COMPLETE.** Gate passed — reproducible numbers
+  committed for both the local cluster and the live GCP deployment (evidence below).
+  - **Harness** (D23): new zero-dependency `benchmarks/bench.mjs` — built-in `fetch` +
+    `node:perf_hooks` only, no new npm package, no build step, run as plain `node
+    benchmarks/bench.mjs <load|failover>`. `load` fires a fixed-shape/fixed-count batch of
+    writes at bounded concurrency directly at the current leader's `/client-write` (no auth on
+    that endpoint — L6 auth is gateway-only — and it only replies `success:true` after majority
+    commit, so timing it is exactly §7 #3's "client submit → majority commit" latency).
+    `failover` times `docker compose stop <leader>` → new leader elects + commits a write, then
+    restarts the stopped container. §7 #4 (partition behavior) is left to the existing
+    `scripts/test-network-partition.sh` — a pass/fail behavioral property, not a percentile,
+    already proven live in L7b. Every run appends params + machine spec + results to
+    `benchmarks/results/*.md`.
+  - **Two real bugs found only by running the harness against the live GCP VM** (D25, not
+    caught locally or by static review): `execSync(..., {stdio:'inherit'})` for `docker compose
+    stop/start` reported a spurious nonzero exit over the `gcloud ssh`-relayed pty despite the
+    command succeeding (fixed: piped stdio + explicit error surfacing); `parseArgs` only
+    supported `--flag=value`, so the space-separated `--compose-file docker-compose.prod.yml`
+    silently became `compose-file="true"` (the missing-value default) and got handed to
+    `docker compose -f` as a literal filename (fixed: parser now accepts both flag syntaxes).
+  - **Also fixed along the way** (D24, real regression, not part of L8's own scope): local
+    `docker compose up` was broken since L7a's multi-stage Dockerfile rewrite —
+    `docker-compose.yml` (dev)'s `npm run dev`/`tsx watch` needs the Dockerfile's `build` stage
+    (devDependencies + `src/`), but an unqualified multi-stage build resolves to the last stage
+    (`runtime`, prod-only deps, no source). Neither L7a nor L7b's gates exercised the dev compose
+    file after the rewrite. Fixed with `target: build` on all 4 dev services;
+    `docker-compose.prod.yml` untouched (correctly wants the final stage).
+  - **Gate evidence — local** (`docker compose up --build -d`, all 5 containers healthy,
+    `writes=500 concurrency=16`): `load` run twice back-to-back — **41.26** then **40.37**
+    writes/s, p50 **388.7ms** then **387.7ms**, p99 **547.7ms** then **503.5ms** — same ballpark,
+    the reproducibility property this layer's gate requires. `failover` — leader (replica2)
+    stopped, replica1 elected and committed a write, cluster restored to 3/3 healthy:
+    **failoverMs 3359.6**. Machine: local Docker Desktop host.
+  - **Gate evidence — live GCP** (`mini-raft` VM, `docker-compose.prod.yml`, all 5 containers
+    healthy throughout, harness run via a temporary portable Node 20 binary — no `npm`/
+    TypeScript toolchain installed on the VM, consistent with D20 — deleted after use):
+    `load` (`writes=500 concurrency=16`) — **79.03** writes/s, p50 **196.8ms**, p99 **304.4ms**.
+    `failover` — leader (replica2) stopped, replica1 elected and committed a write, cluster
+    restored to 5/5 healthy: **failoverMs 3360.5**. Machine: GCP `e2-small` (2 vCPU Intel Xeon
+    @2.2GHz, 1.9GB RAM), `linux 6.8.0-1063-gcp`, Node v20.18.1. Result files committed:
+    `benchmarks/results/2026-07-20T21-09-33-561Z-load.md`,
+    `2026-07-20T21-18-14-317Z-failover.md`.
+  - **§7 resume numbers**: ~40-80 committed writes/s (local/live), p50 commit latency
+    ~197-389ms, p99 ~304-548ms (single-client-process load at concurrency 16 — not a hardware
+    ceiling claim), automatic leader failover in ~3.4s across a 3-node cluster (dominated by the
+    election timeout window + this harness's own 500ms polling granularity, not raw RPC cost).
+  - **RESULT: PASS** — reproducible numbers committed for both environments; a same-environment
+    re-run lands in the same ballpark (shown directly for local; GCP not re-run a second time to
+    avoid burning more VM uptime, but uses the identical code path already proven reproducible
+    locally).
 - **2026-07-20 — Layer 7b (live GCP bring-up) COMPLETE.** L7 gate passed against the real
   deployed cluster (evidence below). D20 covers the two execution decisions made along the way.
   - **Live topology**: GCP project `mini-raft-prod`, VM `mini-raft` (`e2-small`, asia-south1-a,
@@ -327,12 +377,13 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 8 — Proof & benchmarks** (per `PROJECT_PLAN.md`), now that L7b's live gate has
-  passed. Benchmark harness work can start against the local dev cluster; headline numbers
-  should ultimately come from the deployed GCP cluster for interview defensibility.
+- **Layer 9 — Interview-defense pack + README rewrite** (per `PROJECT_PLAN.md`), now that L8's
+  benchmark numbers are committed for both local and live environments.
 - **Reminder**: the GCP VM is running against the **90-day free trial** (see D19) — delete the
   instance (`gcloud compute instances delete mini-raft --project=mini-raft-prod
   --zone=asia-south1-a`) once done demoing/benchmarking to stop credit burn, per `DEPLOY.md`.
+  Still up as of L8 (benchmarked against it); leave it up if L9's README work will also want to
+  screenshot/reference the live deployment, otherwise tear down.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
