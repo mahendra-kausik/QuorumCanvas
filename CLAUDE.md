@@ -50,6 +50,17 @@ I must be able to explain **every non-trivial decision** in an interview. So:
 - Keep each entry short but complete: Context → Decision → Why → Alternatives considered → Tradeoffs/risks.
 - If a decision reverses an earlier one, add a new entry that references the old one (don't silently edit history).
 - Trivial choices (variable names, obvious formatting) do **not** need entries. When unsure, log it.
+- **Also log every real bug/error hit and fixed while building or deploying** — a failed
+  command, a wrong assumption caught by an actual error message, a misbehavior only found by
+  running the real system (not just reading the code) — even if it didn't involve much design
+  discussion. These are "What problems did you face and how did you resolve it?" interview
+  material and are easy to forget once fixed. Use the template loosely for these: Context (what
+  broke, what the actual error/symptom was) → Decision (the fix) → Why (root cause, not just the
+  symptom) → Tradeoffs/risks (if any); "Alternatives considered" can be skipped if the fix was
+  the obvious one. Small fixes can be grouped into one entry if they happened in the same
+  session and don't each warrant a full write-up (see D21 for an example of two grouped
+  together). Skip only genuinely trivial slips (a typo, a wrong flag caught before running
+  anything) — anything that produced a real failure and required root-causing is worth logging.
 
 ---
 

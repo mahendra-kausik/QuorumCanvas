@@ -18,7 +18,7 @@
 
 ---
 
-### D21 — Gateway `UV_THREADPOOL_SIZE=16`: fix `/cluster-status` false-unhealthy during a real peer outage
+### D22 — Gateway `UV_THREADPOOL_SIZE=16`: fix `/cluster-status` false-unhealthy during a real peer outage
 - Date: 2026-07-20
 - Context: running L7b's live failover gate (stop the leader container, confirm the dashboard
   and writes behave correctly) surfaced a real bug: `GET /cluster-status` reported **every**
@@ -56,6 +56,38 @@
   Docker Desktop dev loop or the L7a local-verify gate exercised (the local gate never stopped
   a peer's *container* the way the live L7b failover gate did) — worth carrying into the dev
   compose file too if this recurs there, not done here since out of L7b's scope.
+- Supersedes: none.
+
+---
+
+### D21 — Two smaller L7b problems hit while running the live gate (compose profile validation; wrong write endpoint)
+- Date: 2026-07-20
+- Context: two more concrete "what went wrong / how fixed" incidents from the live L7b bring-up,
+  worth keeping alongside D19-D20/D22 as interview material even though neither needed much
+  design discussion.
+- Problem 1 — **`docker compose` validates every service's env vars regardless of `--profile`**.
+  `docker-compose.prod.yml`'s named-tunnel `cloudflared` service required `TUNNEL_TOKEN` via
+  `${TUNNEL_TOKEN:?...}`. Running `./scripts/deploy-up.sh quicktunnel` (which never starts that
+  service) still failed at the compose-file-parsing stage with `required variable TUNNEL_TOKEN
+  is missing a value` — profile-gating only controls which services *start*, not which services'
+  env interpolation gets validated. Fixed by relaxing to `${TUNNEL_TOKEN:-}` (the named-tunnel
+  service still fails clearly at container startup if actually invoked without a real token, so
+  nothing silently breaks for that path).
+- Problem 2 — **tested the write path against the wrong endpoint at first**. `DEPLOY.md`'s
+  original local gate examples (L1-L6) used `POST /client-write` directly against a *replica*
+  for quick local testing. Assumed the same route existed on the *gateway* and tried it through
+  the public tunnel — got back the gateway's plain-text fallback response (`"Mini-RAFT
+  Gateway"`), not JSON. Reading `gateway/src/index.ts` showed the gateway's HTTP surface is only
+  `/health`, `/cluster-status`, and CORS preflight — writes are **WebSocket-only**
+  (`gateway/src/messageHandler.ts`), matching what the real frontend does. Fixed by writing a
+  small WebSocket test client (`join` → `stroke`, same protocol as `useWebSocket.ts`) instead —
+  this is also the *more correct* gate, since it exercises the actual client-facing protocol
+  rather than an internal test-only route.
+- Why these are worth keeping: both are "read the actual code / actual tool behavior instead of
+  assuming" stories — the kind of debugging judgment call an interviewer asks about — even
+  though each fix was small.
+- Tradeoffs / risks: none beyond what's already noted (Problem 1's fix means a misconfigured
+  named-tunnel run fails later, at container-start, instead of at compose-parse time).
 - Supersedes: none.
 
 ---
