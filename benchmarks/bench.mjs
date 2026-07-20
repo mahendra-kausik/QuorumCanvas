@@ -20,9 +20,18 @@ const RESULTS_DIR = join(__dirname, 'results');
 
 function parseArgs(argv) {
   const flags = {};
-  for (const arg of argv) {
-    const m = /^--([^=]+)(?:=(.*))?$/.exec(arg);
-    if (m) flags[m[1]] = m[2] ?? true;
+  for (let i = 0; i < argv.length; i++) {
+    const m = /^--([^=]+)(?:=(.*))?$/.exec(argv[i]);
+    if (!m) continue;
+    // Supports both `--flag=value` and space-separated `--flag value` (the next arg, unless
+    // it's itself a `--flag`, in which case this one is a boolean).
+    if (m[2] !== undefined) {
+      flags[m[1]] = m[2];
+    } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
+      flags[m[1]] = argv[++i];
+    } else {
+      flags[m[1]] = true;
+    }
   }
   return flags;
 }
