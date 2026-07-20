@@ -173,6 +173,21 @@ async function cmdLoad(flags) {
   console.log(`Results written to ${path}`);
 }
 
+// Captured (not `inherit`) stdio: over a relayed SSH pty (e.g. gcloud's plink on Windows),
+// `inherit`-ing docker compose's TTY progress spinner can make execSync see a spurious
+// nonzero exit unrelated to the command's real outcome. Piping avoids that and gives a
+// useful error message on a genuine failure.
+function runCompose(composeFile, args) {
+  try {
+    const out = execSync(`docker compose -f ${composeFile} ${args}`, { stdio: ['ignore', 'pipe', 'pipe'] });
+    process.stdout.write(out);
+  } catch (err) {
+    process.stderr.write(err.stdout ?? '');
+    process.stderr.write(err.stderr ?? '');
+    throw new Error(`docker compose ${args} failed (exit ${err.status})`);
+  }
+}
+
 async function cmdFailover(flags) {
   const ports = String(flags.ports ?? '3001,3002,3003').split(',').map((s) => s.trim());
   const composeFile = String(flags['compose-file'] ?? 'docker-compose.yml');
@@ -182,7 +197,7 @@ async function cmdFailover(flags) {
   console.log(`Leader: ${leader.replicaId} (port ${leader.port}) -- stopping it`);
 
   const t0 = performance.now();
-  execSync(`docker compose -f ${composeFile} stop ${leader.replicaId}`, { stdio: 'inherit' });
+  runCompose(composeFile, `stop ${leader.replicaId}`);
 
   console.log('Waiting for a new leader to be elected and confirm a committed write...');
   let newLeader;
@@ -202,7 +217,7 @@ async function cmdFailover(flags) {
   const failoverMs = performance.now() - t0;
 
   console.log(`Restarting ${leader.replicaId} to leave the cluster whole...`);
-  execSync(`docker compose -f ${composeFile} start ${leader.replicaId}`, { stdio: 'inherit' });
+  runCompose(composeFile, `start ${leader.replicaId}`);
 
   if (!newLeader) {
     console.error('FAILED: no new leader committed a write within 30s');
