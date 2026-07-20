@@ -18,6 +18,22 @@
 
 ---
 
+### D26 — `DEFENSE.md` as a separate file, every answer anchored to `file:line`
+- Date: 2026-07-21
+- Context: L9 needs the §8 interview questions answered "grounded in code." Two options: a
+  README section, or a standalone `DEFENSE.md`.
+- Decision: standalone `DEFENSE.md`, one section per question, each ending in concrete
+  `raftNode.ts:NNN` / test `file:line` citations rather than prose claims. README links to it and
+  keeps only a one-line-each property summary.
+- Why: it mirrors §8's structure 1:1 (easy to check against the gate), keeps the README scannable
+  as "the paper" instead of a wall of Raft theory, and the citations are the whole point — a
+  reviewer clicks through to the code that proves each claim. Line numbers were re-grepped against
+  the current tree at write time, not trusted from memory.
+- Alternatives considered: inline README section (rejected — bloats the README and buries the
+  citations); auto-generating anchors (overkill for 7 questions).
+- Tradeoffs / risks: line numbers drift if `raftNode.ts` is edited later; mitigated by also naming
+  the symbol (e.g. `updateCommitIndex`) so a stale number is trivially re-found by grep.
+
 ### D25 — Two bugs in `bench.mjs` itself, caught only by running it against the live GCP VM
 - Date: 2026-07-21
 - Context: the `load` command worked first try, both locally and on the VM. `failover` passed

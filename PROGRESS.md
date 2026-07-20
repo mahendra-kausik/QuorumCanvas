@@ -3,6 +3,31 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
+- **2026-07-21 — Layer 9 (Interview-defense pack + README rewrite) COMPLETE.** Final layer.
+  Docs only — no code changed.
+  - **`DEFENSE.md`** (new, D26): one section per `PROJECT_PLAN.md` §8 question (why majority
+    quorum, commit safety / current-term rule, split vote, log divergence, what breaks without
+    persistence, reads / ReadIndex, why not an off-the-shelf lib), each ending in concrete
+    `file:line` citations into the real code — line numbers re-grepped against the current tree,
+    not from memory. Ends with a property→test map.
+  - **`README.md`** rewritten into "the paper": mermaid architecture diagram, benchmark table
+    (the committed L8 numbers — local ~40 w/s, GCP 79 w/s / p50 197ms / p99 304ms / 3.4s
+    failover), Raft-properties-and-where-they-live summary linking DEFENSE.md, deploy section
+    pointing at `DEPLOY.md` (no hardcoded ephemeral tunnel URL), and an honest
+    "Tradeoffs & caveats" section **replacing the now-stale "Current Limitations"** (which still
+    claimed in-memory / no auth — false since L1/L6).
+  - **Gate evidence (docs-only gate):** every DEFENSE.md citation re-verified against the live
+    tree at write time — `updateCommitIndex` `raftNode.ts:458`, current-term guard `:463`,
+    `becomeCandidate` `:130`, split-vote finalize `:183-192`, `handleAppendEntries` consistency
+    `:301-312` + truncate/committed-protection `:314-331`, `persistState` `:91` + vote-fsync seam
+    `:257-259`, `confirmLeadership` `:807` / `readBoardState` `:842`, timeouts `config.ts:50-52`,
+    `truncateFrom` `raftLog.ts:66`, log-append fsync `raftLog.ts:34-36`; cited tests
+    (`crashRecovery`/`readIndex`/`snapshot`/`backpressure`.test.ts) all exist. README benchmark
+    numbers match `benchmarks/results/*.md` exactly (no invented figures); all relative links
+    resolve (`DEFENSE.md`, `DECISIONS.md`, `Documentation.md`, `PROJECT_PLAN.md`, `DEPLOY.md`,
+    `benchmarks/`). Grep confirms no stale "in-memory"/"no authentication"/"Current Limitations"
+    left in README (**RESULT: PASS** — every defense answer cites real code; README reproduces
+    the deploy + benchmarks). D26 logged. **All 9 build layers now complete.**
 - **2026-07-21 — Layer 8 (Proof & benchmarks) COMPLETE.** Gate passed — reproducible numbers
   committed for both the local cluster and the live GCP deployment (evidence below).
   - **Harness** (D23): new zero-dependency `benchmarks/bench.mjs` — built-in `fetch` +
@@ -377,8 +402,9 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 9 — Interview-defense pack + README rewrite** (per `PROJECT_PLAN.md`), now that L8's
-  benchmark numbers are committed for both local and live environments.
+- **All 9 build layers complete.** No further layers planned in `PROJECT_PLAN.md`. Remaining work
+  is operational: tear down the GCP VM (below) and, if desired, capture live-deployment
+  screenshots for the résumé/portfolio before doing so.
 - **Reminder**: the GCP VM is running against the **90-day free trial** (see D19) — delete the
   instance (`gcloud compute instances delete mini-raft --project=mini-raft-prod
   --zone=asia-south1-a`) once done demoing/benchmarking to stop credit burn, per `DEPLOY.md`.

@@ -1,236 +1,196 @@
 # Mini-RAFT
 
-Mini-RAFT is a distributed, fault-tolerant collaborative drawing board.
+A deployed, fault-tolerant, real-time collaborative drawing board whose write path is a
+**hand-rolled Raft consensus cluster** — leader election, a crash-durable replicated log, and
+majority commit — written from scratch in TypeScript. A stroke becomes visible only after it is
+**committed by a majority** of replicas.
 
-It combines:
-- A React frontend canvas (multi-user drawing, undo/redo)
-- A WebSocket gateway (client coordination, board sessions)
-- A RAFT replica cluster (leader election, replicated log, majority commit)
+Not a toy: it's crash-durable (WAL + snapshots, fsynced before every dependent RPC reply),
+serves correct reads (ReadIndex), is observable (Prometheus `/metrics`), auth-gated, benchmarked,
+and runs at a public URL on free-tier cloud.
 
-The project is designed for demos of leader failover, replica catch-up, and network partition recovery.
+- **Design defense** — the hard Raft questions answered from code: [`DEFENSE.md`](DEFENSE.md)
+- **Every non-trivial decision, with rationale**: [`DECISIONS.md`](DECISIONS.md)
+- **Deep protocol notes**: [`Documentation.md`](Documentation.md)
+- **Build plan + acceptance gates**: [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
 
-## Core Features
+---
 
-- Real-time collaborative drawing over WebSocket
-- RAFT-backed write path (majority commit required)
-- Leader failover with continued writes after re-election
-- Follower catch-up after restart
-- Undo/redo implemented as compensation entries in the replicated log
-- Dashboard for live replica health and RAFT status
-- Docker hot-reload dev stack with 3 replicas
-- Demo scripts that capture logs and snapshots automatically
+## Architecture
 
-## Repository Layout
-
-```text
-Mini-Raft/
-├── README.md
-├── CLAUDE.md          # Build protocol / operating contract
-├── PROJECT_PLAN.md    # Layered upgrade plan + acceptance gates
-├── DECISIONS.md       # Decision log
-├── PROGRESS.md        # Session state
-├── Documentation.md   # Deep architecture & protocol notes
-├── docker-compose.yml
-├── frontend/          # React + Vite client
-├── gateway/           # Node WebSocket + HTTP gateway
-├── replica/           # RAFT node implementation
-├── replica1..3/       # Per-node instance dirs (compose bind mounts; gitignored, auto-created)
-├── scripts/           # Failover and partition demo scripts
-├── tests/             # Service-level test suites
-└── logs/              # Script-generated artifacts
+```mermaid
+flowchart LR
+  U["React canvas<br/>(Vercel)"] -- "WS stroke" --> GW["Gateway<br/>(WS + HTTP)"]
+  GW -- "POST /client-write" --> L["Raft leader"]
+  L -- "AppendEntries" --> F1["Follower"]
+  L -- "AppendEntries" --> F2["Follower"]
+  F1 -. "ack" .-> L
+  F2 -. "ack" .-> L
+  L -- "committed on majority" --> GW
+  GW -- "stroke_broadcast" --> U
 ```
 
-## Architecture At A Glance
+**Write path:** frontend `stroke` over WebSocket → gateway routes it to the current leader's
+`/client-write` → leader appends, replicates via AppendEntries, commits once a majority acks →
+gateway broadcasts the committed stroke to the board's clients. A stroke that never reaches
+majority is never broadcast.
 
-Write flow:
-1. Frontend sends `stroke` over WebSocket to gateway.
-2. Gateway forwards write to RAFT leader (`/client-write`) via `RemoteRaftClient`.
-3. Leader appends entry, replicates to followers, commits on majority.
-4. Gateway broadcasts committed stroke to connected board clients.
+**Read/join path:** client `join` → gateway fetches board state from the leader's `/board-state`,
+which serves only after a **ReadIndex** leadership confirmation (a minority-partitioned leader
+returns `421` + a redirect instead of a stale view) → gateway replies `join_ack` with the strokes.
 
-Read/join flow:
-1. Client sends `join` for a board.
-2. Gateway fetches board state from replicas (`/board-state`).
-3. Gateway sends `join_ack` with current strokes.
+Three services, kept separate: `frontend/` (React + Vite), `gateway/` (Node `http`/`ws`),
+`replica/` (the Raft node — log/persistence, state machine, RPC, timers, transport as modules).
 
-## Services And Ports
+---
 
-- Frontend: `http://localhost:5173`
-- Gateway HTTP + WS: `http://localhost:8080`, `ws://localhost:8080/ws`
-- Replica1: `http://localhost:3001`
-- Replica2: `http://localhost:3002`
-- Replica3: `http://localhost:3003`
+## Benchmarks
 
-## Prerequisites
+Measured by the zero-dependency harness in [`benchmarks/`](benchmarks/README.md)
+(`node benchmarks/bench.mjs <load|failover>`), driving committed writes directly at the leader's
+`/client-write` (which replies only after majority commit). Raw result files with full params live
+in [`benchmarks/results/`](benchmarks/results/).
 
-- Node.js 20+
-- npm
-- Docker + Docker Compose (for full cluster demo)
-- Bash (Git Bash on Windows is fine for scripts)
+| Metric | Local (Docker Desktop) | Live GCP `e2-small` |
+|---|---|---|
+| Committed writes/s | ~40–41 | **79.0** |
+| Commit latency p50 | ~388 ms | **197 ms** |
+| Commit latency p99 | ~504–548 ms | **304 ms** |
+| Automatic leader failover | 3.36 s | 3.36 s |
 
-## Quick Start (Recommended: Docker)
+Workload: `writes=500 concurrency=16`, single client process (not a hardware ceiling). GCP shape:
+`e2-small` (2 vCPU Xeon @2.2GHz, 1.9 GB RAM), Node 20. Failover time is dominated by the 500–800 ms
+election-timeout window plus the harness's own 500 ms polling granularity, not raw RPC cost.
+Local numbers reproduce across back-to-back runs (the L8 gate requirement).
+
+> **Résumé line:** *Built a crash-durable Raft cluster in TypeScript (WAL + snapshots) backing a
+> real-time collaborative canvas: **79 committed writes/s**, **p99 304 ms** commit latency,
+> automatic leader failover in **~3.4 s** across a 3-node cluster; deployed on free-tier cloud.*
+
+---
+
+## Raft properties implemented (and where they live)
+
+Full walkthrough with `file:line` citations in [`DEFENSE.md`](DEFENSE.md). In brief:
+
+- **Leader election** with randomized timeouts (500–800 ms) + split-vote retry
+- **Crash-durable state** — `currentTerm`/`votedFor`/log fsynced *before* any dependent RPC reply
+- **Majority commit** with the **current-term commit rule** (Figure-8 safety, §5.4.2)
+- **Log consistency check** + truncate-on-conflict, committed entries protected from overwrite
+- **Snapshots & log compaction** (bounded log, InstallSnapshot RPC for far-behind followers)
+- **Correct reads** via ReadIndex (no stale reads on a partitioned leader)
+- **Backpressure** — AppendEntries batch cap + a single coalesced replication driver per peer
+
+Each ships with a test that fails if the property breaks (see the map at the bottom of `DEFENSE.md`).
+
+---
+
+## Quick start (Docker)
 
 ```bash
 docker compose up --build -d
 docker compose ps
 ```
 
-Open:
-- Frontend: `http://localhost:5173`
-- Dashboard: `http://localhost:5173/dashboard`
-- Gateway health: `http://localhost:8080/health`
-- Cluster status: `http://localhost:8080/cluster-status`
-
-Stop everything:
+- Frontend: `http://localhost:5173` · Dashboard: `http://localhost:5173/dashboard`
+- Gateway health: `http://localhost:8080/health` · Cluster status: `http://localhost:8080/cluster-status`
+- Replicas: `http://localhost:3001..3003`
 
 ```bash
-docker compose down
+docker compose down   # stop everything
 ```
 
-## Local Development (Without Docker)
+Auth is gateway-only; set `AUTH_TOKEN` in the compose env to require a bearer token on
+`/cluster-status` and a `?token=` on the WebSocket (`/health` stays open for liveness).
 
-Run each service in separate terminals.
+## Local development (without Docker)
 
-### 1) Replica nodes
-
-From `replica/`:
-
-```bash
-npm install
-```
-
-Run 3 nodes:
+Run each service in its own terminal.
 
 ```bash
-# replica1
+# replica/  — three nodes
 REPLICA_ID=replica1 PORT=3001 PEERS="http://localhost:3002,http://localhost:3003" npm run dev
-
-# replica2
 REPLICA_ID=replica2 PORT=3002 PEERS="http://localhost:3001,http://localhost:3003" npm run dev
-
-# replica3
 REPLICA_ID=replica3 PORT=3003 PEERS="http://localhost:3001,http://localhost:3002" npm run dev
-```
 
-### 2) Gateway
-
-From `gateway/`:
-
-```bash
-npm install
+# gateway/
 RAFT_PEERS="http://localhost:3001,http://localhost:3002,http://localhost:3003" npm run dev
-```
 
-### 3) Frontend
-
-From `frontend/`:
-
-```bash
-npm install
+# frontend/
 npm run dev
 ```
 
-Optional env vars for frontend:
-- `VITE_WS_URL` (default: `ws://localhost:8080/ws`)
-- `VITE_GATEWAY_HTTP_URL` (default: `http://localhost:8080`)
+`npm install` once per service first. Frontend env: `VITE_WS_URL` (default
+`ws://localhost:8080/ws`), `VITE_GATEWAY_HTTP_URL` (default `http://localhost:8080`),
+`VITE_AUTH_TOKEN` (must match the gateway's `AUTH_TOKEN` when auth is on).
 
-## HTTP APIs
+---
 
-### Gateway
+## Deployment
 
-- `GET /health`
-- `GET /cluster-status` (requires `RAFT_PEERS`)
-- `WS /ws?boardId=<id>&userId=<id>`
+The cluster runs at a public URL on free-tier cloud (currently GCP `e2-small` on the 90-day free
+trial; Oracle Always Free is the documented alternative). Public HTTPS/WSS entry is via a
+Cloudflare Tunnel; the frontend is on Vercel. **Full runbook, step by step:**
+[`DEPLOY.md`](DEPLOY.md) — provision the VM, build/push images, create the tunnel, fill `.env`,
+`scripts/deploy-up.sh`, deploy the frontend, then verify the live gate (public write, remote
+failover, reboot survival).
 
-### Replica
+> The deployment uses a token-free Cloudflare **quick tunnel**, whose `*.trycloudflare.com`
+> hostname changes on restart — so no live URL is hardcoded here; get the current one from the
+> VM as described in `DEPLOY.md`.
 
-- `POST /request-vote`
-- `POST /append-entries`
-- `POST /heartbeat`
-- `POST /sync-log`
-- `POST /client-write`
-- `GET /health`
-- `GET /status`
-- `GET /board-state?boardId=<id>`
+---
 
-## WebSocket Message Model
+## HTTP / WebSocket API
 
-Client to gateway:
-- `join` (`boardId`, `userId`)
-- `stroke` (`stroke` payload)
+**Gateway:** `GET /health`, `GET /cluster-status` (bearer auth), `WS /ws?boardId=&userId=&token=`.
 
-Gateway to client:
-- `join_ack`
-- `stroke_broadcast`
-- `user_joined`
-- `user_left`
-- `error`
+**Replica:** `POST /request-vote` · `/append-entries` · `/heartbeat` · `/sync-log` ·
+`/install-snapshot` · `/client-write`; `GET /health` · `/ready` · `/status` · `/metrics`
+(Prometheus) · `/board-state?boardId=`.
 
-Notes:
-- Same user can have multiple tabs on one board.
-- Broadcast exclusion is socket-based, so same-user tabs still receive each other's updates.
+**WS messages** — client→gateway: `join`, `stroke`. gateway→client: `join_ack`,
+`stroke_broadcast`, `user_joined`, `user_left`, `error`. Same user may open multiple tabs on one
+board; broadcast exclusion is per-socket so same-user tabs still see each other. Undo/redo are
+compensation entries in the replicated log.
 
-## RAFT Behavior Implemented
+---
 
-- States: follower, candidate, leader
-- Randomized election timeout with replica-specific skew
-- Heartbeat interval and append-based replication
-- Majority commit rule
-- Leader demotion when higher term is observed
-- Catch-up sync for lagging/restarted followers
-- Committed-entry conflict protection
+## Testing & demos
 
-## Demo Scripts
+```bash
+cd replica  && npm test   # 105 tests
+cd gateway  && npm test   # 65 tests
+cd frontend && npm test   # 41 tests
+```
 
-From repository root:
+CI (`.github/workflows/ci.yml`) builds and tests all three on push/PR to `main`. Failure demos
+write timestamped artifacts under `logs/`:
 
 ```bash
 bash scripts/test-failover.sh
 bash scripts/test-network-partition.sh
 ```
 
-Outputs are saved under timestamped folders in `logs/` and include:
-- Replica status snapshots
-- Write responses
-- Docker compose logs
+---
 
-## Testing
+## Tradeoffs & honest caveats
 
-Run per service:
+- **Single-VM, co-located cluster.** The 3 replicas + gateway run as containers on one VM — this
+  proves the consensus protocol, not geo-distributed fault tolerance. A real deployment would
+  spread replicas across failure domains.
+- **Hand-rolled, not battle-tested.** Written to *demonstrate* each safety property from readable
+  code (that's the point — see `DEFENSE.md`), not to compete with etcd/raft at scale.
+- **No dynamic membership.** Joint-consensus reconfiguration, multi-Raft sharding, and
+  geo-replication are acknowledged next steps, not implemented (`PROJECT_PLAN.md` §9).
+- **No inter-replica TLS.** RPC between replicas is plaintext on a trusted network; auth is
+  enforced at the gateway edge only. The gateway `AUTH_TOKEN` is coarse admission control (baked
+  into the public bundle), not a per-user secret — there is no account model.
+- **Ephemeral public URL.** The token-free Cloudflare quick tunnel gets a new hostname on restart
+  (a deliberate free-tier choice; a named tunnel with a domain removes this — see `DECISIONS.md`).
+- **Read freshness bound.** A freshly-elected leader's `commitIndex` can briefly lag until its
+  first current-term commit — never wrong data, self-healing (`DECISIONS.md` D13).
 
-```bash
-cd frontend && npm test
-cd ../gateway && npm test
-cd ../replica && npm test
-```
+## Prerequisites
 
-CI is configured in `.github/workflows/ci.yml` to build and test all three services on push/PR to `main`.
-
-## Useful Commands
-
-```bash
-# Rebuild and restart all services
-docker compose up --build -d
-
-# Follow gateway logs
-docker compose logs -f gateway
-
-# Follow all replica logs
-docker compose logs -f replica1 replica2 replica3
-
-# Restart only gateway
-docker compose restart gateway
-```
-
-## Current Limitations
-
-- State is in-memory (no durable disk persistence across full cluster teardown)
-- No authentication or authorization on WS/API paths
-- No TLS between internal replica RPC peers
-- Intended for local/lab environments and demo workflows
-
-## Additional Documentation
-
-- Deep architecture and protocol notes: `Documentation.md`
-- Upgrade plan and build layers: `PROJECT_PLAN.md`
-- Design decisions and rationale: `DECISIONS.md`
+Node.js 20+, npm, Docker + Docker Compose (for the cluster), Bash (Git Bash on Windows is fine).
