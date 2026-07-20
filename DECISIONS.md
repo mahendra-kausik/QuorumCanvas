@@ -18,6 +18,83 @@
 
 ---
 
+### D20 — L7b image delivery: build+push locally to Artifact Registry; public entry: Cloudflare quick tunnel
+- Date: 2026-07-20
+- Context: D19 picked `e2-small` (2 vCPU/2GB) for L7b. `docker-compose.prod.yml` as written
+  (`build: ./replica` / `./gateway`, invoked via `deploy-up.sh --build` on the VM) would run
+  `npm ci`+`tsc` for the replica and gateway build stages concurrently on that same 2GB VM —
+  real OOM/slowness risk on the smallest paid-adjacent shape. Separately, D19 assumed a named
+  Cloudflare Tunnel per the original `DEPLOY.md`, but the user has never created a Cloudflare
+  account, and a named tunnel's stable hostname needs one (plus a domain).
+- Decision: (1) **Build both images locally** (Docker Desktop, already running on the user's
+  laptop, confirmed reachable) tagged for **GCP Artifact Registry**
+  (`asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/{replica,gateway}:latest`, one shared
+  `replica` image reused by replica1-3 since they're the same Dockerfile/context), pushed
+  before the VM ever runs. `docker-compose.prod.yml` gained `image:` tags alongside the
+  existing `build:` (both kept — local iteration/dev still uses `build`); `deploy-up.sh` now
+  `pull`s instead of `--build`s. The VM's only Artifact Registry credential is the attached
+  service-account's metadata-server token via `docker login -u oauth2accesstoken` — no
+  `gcloud` SDK install needed on the VM. (2) **Cloudflare quick tunnel** (new
+  `cloudflared-quick` service, profile `quicktunnel`, `tunnel --url http://gateway:8080`, no
+  `TUNNEL_TOKEN`) as the primary L7b public entry — zero account, zero cost, works today. The
+  original named-tunnel service/profile is kept in the compose file and `DEPLOY.md` as a
+  documented upgrade path if the user later gets a Cloudflare account + domain.
+- Why: eliminates the VM as a build environment entirely (removes the single biggest RAM risk
+  on a 2GB shape) and unblocks the public-URL requirement with the accounts the user actually
+  has today.
+- Alternatives considered: build-on-VM with a swap file (still slow/risky on 2GB, adds a step
+  D19 specifically tried to avoid); Docker Hub as the registry (would need a separate free
+  account — Artifact Registry reuses the already-authenticated `gcloud` session, zero new
+  signup); named Cloudflare tunnel now (blocked — no account/domain today; kept as the
+  documented upgrade, not deleted).
+- Tradeoffs / risks: the quick-tunnel hostname is **ephemeral** — changes on every
+  `cloudflared-quick` restart (including a VM reboot), requiring Vercel's env vars and the
+  gateway's `ALLOWED_ORIGINS` to be re-pointed after any restart. This is an explicit, known
+  ceiling of the token-free path (see `DEPLOY.md` §3/§6), not a bug; a named tunnel is the
+  upgrade if URL stability becomes worth a domain purchase. Artifact Registry images are
+  private by default — the VM's metadata-token login step is a new manual step in `DEPLOY.md`.
+- Supersedes: none (refines D19's L7b execution, doesn't reverse the GCP/`e2-small` choice).
+
+---
+
+### D19 — L7b cloud target: GCP `e2-small` (asia-south1) on the free trial, not Oracle Always Free
+- Date: 2026-07-20
+- Context: D18 chose Oracle Cloud Always Free ARM as the L7b host. The user hit persistent
+  Oracle signup/login friction blocking L7b. Re-examining the actual requirement: the cluster
+  needs to be live at a public URL for a placement-interview season (provably deployed,
+  demoable), not running forever — so "always-free" is not actually load-bearing, "free enough
+  for ~3 months and reliably provisionable" is. The user already has GCP free-trial credits
+  enabled.
+- Decision: Host L7b on **GCP Compute Engine, machine type `e2-small` (2 vCPU/2GB), region
+  asia-south1 (Mumbai)**, billed against the **$300/90-day free trial** (not a paid account).
+  `docker-compose.prod.yml`, the Dockerfiles, Cloudflare Tunnel, and Vercel frontend steps are
+  unchanged — only `DEPLOY.md` §1 (provisioning) and the free-tier notes were rewritten.
+- Why: the trial credit is usable on any region/instance size, not just an always-free micro
+  shape, so a real VM draws down credit the user already has (fastest path, no new signup).
+  `e2-small`'s 2 GB RAM fits 3 replicas + gateway + `cloudflared` with headroom — avoids the
+  swap-file workaround a 1 GB shape (Oracle's blocked path aside, or AWS t3.micro) would need.
+  GCP does not auto-charge past the trial: it stops resources and closes the trial billing
+  account instead, so there's no surprise-bill risk (CLAUDE.md §4). Estimated cost draw for a
+  3-month demo window is ~$75-80 of the $300 credit — the 90-day window binds before the money
+  does.
+- Alternatives considered: **Oracle A1.Flex** (best always-free fit, 12GB RAM — but blocked on
+  account access with no ETA); **AWS t3.micro** (new-account free plan gives $200 credit / up
+  to 6 months, longer window than GCP's 90 days — but only 1 GB RAM, needs a swap file, and the
+  user has no existing AWS credits); **Fly.io** (most authentic multi-machine Raft placement,
+  named as the plan's original fallback — but real billing risk beyond tiny scale, no free
+  credit safety net).
+- Tradeoffs / risks: the **90-day trial window is shorter than AWS's 6-month new-account
+  window** — if the demo/interview season runs longer, the instance must be re-provisioned (a
+  new project's trial, or upgrade to paid, at ~$25-36/mo). `e2-small` is x86, not ARM (no
+  functional impact — Docker images are Node-based and effectively multi-arch already). Not an
+  always-free tier, so unlike Oracle this deployment is explicitly not meant to run
+  indefinitely — must be deleted after use to stop credit burn, tracked as a manual step in
+  `DEPLOY.md`.
+- Supersedes: D18 (Oracle platform choice only — D18's compose/Dockerfile/Cloudflare/Vercel
+  architecture decisions still stand and are reused as-is).
+
+---
+
 ### D18 — L7a deployment topology: single Oracle VM, named-volume prod compose, Cloudflare Tunnel edge, Vercel frontend
 - Date: 2026-07-19
 - Context: L7 needs the cluster running at a public URL on free-tier compute only

@@ -3,9 +3,15 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
-- **2026-07-19 — Layer 7a (Deployment artifacts) COMPLETE. Layer 7b (live Oracle bring-up)
-  is a manual next step — see below.** Gate passed for everything runnable without a real
-  cloud account (evidence below).
+- **2026-07-20 — D19: L7b cloud target switched from Oracle Always Free to GCP `e2-small`
+  (asia-south1) on the $300/90-day free trial.** Oracle login/signup was blocked with no ETA;
+  re-examined the actual requirement (season-length public demo for placement interviews, not
+  lifetime hosting) and the user already had GCP trial credits enabled. `DEPLOY.md` §1
+  (provisioning) and the free-tier notes rewritten for GCP; §2-6 (Cloudflare Tunnel, compose
+  up, Vercel, L7 gate) unchanged — see D19 for full rationale/alternatives. **L7b (live bring-up)
+  is still the open manual next step**, now against GCP instead of Oracle.
+- **2026-07-19 — Layer 7a (Deployment artifacts) COMPLETE.** Gate passed for everything
+  runnable without a real cloud account (evidence below).
   - **Split rationale** (D18): Oracle signup needs the user's card and console provisioning
     (VM, block volume, security list) can't be done by me — split into L7a (author + locally
     verify every deploy artifact, this entry) and L7b (user runs `DEPLOY.md` against the real
@@ -276,10 +282,10 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 7b — live Oracle bring-up** (user-driven, per `DEPLOY.md`; I troubleshoot): provision
-  the Always-Free ARM VM, stand up the Cloudflare Tunnel, deploy the frontend to Vercel, then
-  verify the real L7 gate (public URL, remote failover, reboot survival) against the live
-  cluster. Once that's confirmed, **Layer 8 — Proof & benchmarks** is next per
+- **Layer 7b — live GCP bring-up** (user-driven, per `DEPLOY.md`; I troubleshoot): provision the
+  `e2-small` VM (asia-south1, free trial), stand up the Cloudflare Tunnel, deploy the frontend
+  to Vercel, then verify the real L7 gate (public URL, remote failover, reboot survival) against
+  the live cluster. Once that's confirmed, **Layer 8 — Proof & benchmarks** is next per
   `PROJECT_PLAN.md`.
 
 ## Prioritized defect backlog (from the audit)
@@ -302,8 +308,8 @@ auth/authz/validation/rate-limit/CORS/TLS (**L6**), deploy (**L7**), benchmarks 
 defense pack + README (**L9**).
 
 ## Open questions
-- Oracle Always Free ARM capacity at provision time can be intermittent — confirm shape
-  availability before L7; Fly.io is the documented fallback (may bill).
+- GCP free trial is a **90-day window** (D19) — if the demo/interview season runs longer than
+  that, the VM needs re-provisioning (new trial or paid upgrade, ~$25-36/mo for `e2-small`).
 - Snapshot cadence (L2) and AppendEntries batch cap (L4) values to be tuned against L8 benchmarks.
 
 ## How to resume

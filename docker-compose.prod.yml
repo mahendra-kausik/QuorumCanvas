@@ -1,5 +1,6 @@
 services:
   replica1:
+    image: asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/replica:latest
     build: ./replica
     ports:
       - "3001:3001"
@@ -22,6 +23,7 @@ services:
     restart: unless-stopped
 
   replica2:
+    image: asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/replica:latest
     build: ./replica
     ports:
       - "3002:3002"
@@ -47,6 +49,7 @@ services:
     restart: unless-stopped
 
   replica3:
+    image: asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/replica:latest
     build: ./replica
     ports:
       - "3003:3003"
@@ -74,6 +77,7 @@ services:
     restart: unless-stopped
 
   gateway:
+    image: asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/gateway:latest
     build: ./gateway
     ports:
       - "8080:8080"
@@ -117,6 +121,22 @@ services:
     restart: unless-stopped
     profiles:
       - tunnel
+
+  # L7b: token-free alternative for a Cloudflare account with no domain — prints an ephemeral
+  # https://<random>.trycloudflare.com hostname to its logs instead of routing a stable named
+  # hostname. Same gateway target, same isolation from the public interface; the tradeoff is
+  # the URL changes if this container restarts (see DEPLOY.md).
+  cloudflared-quick:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://gateway:8080
+    networks:
+      - raft-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - quicktunnel
 
 networks:
   raft-net:
