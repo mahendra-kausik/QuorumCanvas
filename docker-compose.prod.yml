@@ -112,7 +112,11 @@ services:
     image: cloudflare/cloudflared:latest
     command: tunnel run
     environment:
-      TUNNEL_TOKEN: "${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env — see DEPLOY.md}"
+      # Not `:?`-required at the compose-file level: `docker compose` interpolates every
+      # service's env regardless of --profile, so a hard requirement here would also block
+      # the token-free `quicktunnel` profile. If you actually invoke the `tunnel` profile
+      # without setting this, cloudflared fails at container startup instead — see DEPLOY.md.
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:-}"
     networks:
       - raft-net
     depends_on:
