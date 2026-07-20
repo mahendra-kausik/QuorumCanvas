@@ -87,6 +87,13 @@ services:
       # L6: the one real secret this project has — set in .env, never committed (CLAUDE.md §4).
       AUTH_TOKEN: "${AUTH_TOKEN:?set AUTH_TOKEN in .env}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS in .env, e.g. the Vercel origin}"
+      # L7b fix (found during the live failover gate): the base image's musl libc resolves a
+      # *stopped* peer's Docker DNS name slowly (~5s NXDOMAIN retry). Node's default libuv
+      # thread pool (4) is small enough that this starves the concurrent, independent DNS
+      # lookups /cluster-status fires for the still-healthy peers, delaying them past their
+      # own 1500ms budget too. Raising the pool avoids the starvation; the per-peer timeouts
+      # in clusterStatus.ts are unchanged and still the real bound.
+      UV_THREADPOOL_SIZE: "16"
     networks:
       - raft-net
     depends_on:
