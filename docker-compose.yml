@@ -1,6 +1,10 @@
 services:
   replica1:
-    build: ./replica
+    build:
+      context: ./replica
+      # Dockerfile is multi-stage (L7a: build -> slim prod runtime). Dev needs the `build`
+      # stage's devDependencies (tsx) and source tree, not the prod runtime's `npm ci --omit=dev`.
+      target: build
     command: npm run dev
     ports:
       - "3001:3001"
@@ -26,7 +30,9 @@ services:
     restart: unless-stopped
 
   replica2:
-    build: ./replica
+    build:
+      context: ./replica
+      target: build
     command: npm run dev
     ports:
       - "3002:3002"
@@ -55,7 +61,9 @@ services:
     restart: unless-stopped
 
   replica3:
-    build: ./replica
+    build:
+      context: ./replica
+      target: build
     command: npm run dev
     ports:
       - "3003:3003"
@@ -86,7 +94,9 @@ services:
     restart: unless-stopped
 
   gateway:
-    build: ./gateway
+    build:
+      context: ./gateway
+      target: build
     command: npm run dev
     ports:
       - "8080:8080"

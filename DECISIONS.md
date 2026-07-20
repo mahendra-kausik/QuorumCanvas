@@ -18,6 +18,77 @@
 
 ---
 
+### D24 — Dev `docker-compose.yml` broken by L7a's multi-stage Dockerfile rewrite; fixed with `target: build`
+- Date: 2026-07-21
+- Context: bringing the local cluster up to run L8's benchmark harness, `docker compose up
+  --build` failed — `replica1` (and, on inspection, `gateway`) never went healthy, logs showing
+  `sh: tsx: not found`. Root cause: L7a (D18) rewrote `replica/Dockerfile` and `gateway/Dockerfile`
+  into multi-stage builds — a `build` stage with `npm ci` (all deps, incl. `tsx`) and `src/`, and
+  a slim `runtime` stage with `npm ci --omit=dev` and only compiled `dist/`. `docker-compose.yml`
+  (dev) still does plain `build: ./replica` with `command: npm run dev` (which shells out to
+  `tsx watch`) and bind-mounts `./replica:/app` for live-reload — but an unqualified multi-stage
+  build produces the **last** stage (`runtime`), which has neither `tsx` nor `src/`. This was a
+  real regression introduced in L7a that the L7a/L7b gates never caught, because neither ran
+  `docker compose up` against the *dev* compose file after the Dockerfile rewrite.
+- Decision: added `target: build` to the `build:` stanza for `replica1`/`replica2`/`replica3`/
+  `gateway` in `docker-compose.yml` only. `docker-compose.prod.yml` is untouched — it has no
+  `target`, so it correctly still resolves to the final `runtime` stage.
+- Why: root-cause fix in the shared compose config each service inherits, not a workaround
+  (e.g. reinstalling `tsx` at runtime). The `build` stage already has exactly what dev mode
+  needs (full deps + source); pinning `target` is the standard Compose mechanism for a
+  multi-stage Dockerfile serving two different consumers.
+- Alternatives considered: a separate `Dockerfile.dev` per service (more files to keep in sync,
+  no real benefit over `target:` since the existing `build` stage is already dev-shaped);
+  reverting the multi-stage Dockerfile (would undo L7a's non-root/slim-runtime prod hardening).
+- Tradeoffs / risks: none — dev and prod build paths are now both correct and explicit about
+  which stage they want; if a Dockerfile ever drops the `build` stage's name this breaks loudly
+  at `docker compose up` (a build reference error), not silently.
+- Supersedes: none (L7a's D18 stands; this is a fix for a gap D18 left, in dev tooling only).
+
+---
+
+### D23 — L8 benchmark harness: zero-dependency `benchmarks/bench.mjs`, measured directly against a replica's `/client-write`
+- Date: 2026-07-21
+- Context: `PROJECT_PLAN.md` §7 wants four measured/published numbers (leader-election/failover
+  time, write throughput, commit-latency p50/p99, partition behavior), with the L8 gate requiring
+  reproducible numbers committed to the repo, on both the local dev cluster and the live GCP
+  deployment.
+- Decision: one dependency-free `benchmarks/bench.mjs`, run via plain `node`, using only
+  `fetch`/`node:perf_hooks`/`node:os`/`node:child_process` — no `k6`, no new npm package, no
+  build step. `load` fires a fixed-shape/fixed-count batch of writes at a bounded concurrency
+  directly at the current leader's `/client-write` (this endpoint has no auth — L6 auth is
+  gateway-only — and only replies `success:true` after majority commit, so timing it is exactly
+  the "client submit → majority commit" latency §7 asks for, with no WS/tunnel noise in the
+  measurement). `failover` times `docker compose stop <leader>` → a new leader elects and commits
+  a write, then restarts the stopped container so the cluster is left whole. Partition behavior
+  (§7 #4) is left to the existing `scripts/test-network-partition.sh` rather than re-implemented
+  here — it's a pass/fail behavioral property, not a percentile, and is already proven live.
+  Params default to fixed values (`writes=2000`, `concurrency=16`, fixed stroke payload) so a
+  re-run lands in the same ballpark; every run appends params + machine spec + results to
+  `benchmarks/results/*.md`.
+- Why: matches the existing ops-tooling convention in this repo — `scripts/*.sh` is already
+  plain bash, not TypeScript, for the same reason (throwaway/one-shot operational scripts, not
+  code defended file-by-file in the interview the way `replica/`/`gateway`/`frontend` are).
+  Zero dependencies means the harness runs identically on a fresh GCP VM with nothing but a
+  Node binary present — no `npm ci`, no TypeScript toolchain, consistent with D20's decision to
+  keep the VM free of the build toolchain entirely.
+- Alternatives considered: `k6` (real load-testing tool, but a new dependency/binary to install
+  on the VM for one metric set); a TypeScript `bench.ts` run via `tsx` (honors "TypeScript
+  throughout" literally, but adds a dev dependency + run wrapper for what is ops tooling, and
+  breaks from the bash-script precedent already in `scripts/`); measuring through the gateway/WS
+  path instead of the replica directly (would conflate Raft commit latency with gateway
+  auth/validation/WS overhead — a different, also-useful number, but not what §7 #3 is asking for).
+- Tradeoffs / risks: `load`'s promise-pool concurrency model is a simple bounded-parallel loop,
+  not a proper open/closed-loop load generator — fine for this project's scale and honest as a
+  "committed writes/sec at N concurrent clients" number, not a claim of finding the cluster's
+  absolute ceiling. `failover`'s measured window includes the harness's own polling granularity
+  (findLeader polls every 500ms), so the reported `failoverMs` is an upper bound on the true
+  election+catch-up time, not a sub-millisecond-precise figure — acceptable given the target is
+  "sub-second to low-seconds," not a tight SLO.
+- Supersedes: none.
+
+---
+
 ### D22 — Gateway `UV_THREADPOOL_SIZE=16`: fix `/cluster-status` false-unhealthy during a real peer outage
 - Date: 2026-07-20
 - Context: running L7b's live failover gate (stop the leader container, confirm the dashboard
