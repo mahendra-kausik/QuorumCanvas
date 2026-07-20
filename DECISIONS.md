@@ -18,6 +18,48 @@
 
 ---
 
+### D21 — Gateway `UV_THREADPOOL_SIZE=16`: fix `/cluster-status` false-unhealthy during a real peer outage
+- Date: 2026-07-20
+- Context: running L7b's live failover gate (stop the leader container, confirm the dashboard
+  and writes behave correctly) surfaced a real bug: `GET /cluster-status` reported **every**
+  peer — including the two still-healthy ones — as unhealthy with `"This operation was
+  aborted"` whenever exactly one peer was down. Directly querying the healthy replicas'
+  own `/status` (bypassing the gateway) showed the Raft core was fine throughout — new leader
+  elected, `commitIndex` advancing correctly — so this was purely a gateway status-aggregation
+  defect, not a consensus bug. Root cause, isolated by `docker exec`ing into the gateway
+  container and timing a raw `wget` to the down peer's Docker DNS name: the base image's musl
+  libc resolver takes **~5s** to return NXDOMAIN for a *stopped* (not just refused) peer
+  hostname. `clusterStatus.ts`'s per-peer fetches each have their own 1500ms
+  `AbortController` timeout and are already correctly isolated per-peer in code — but Node's
+  `fetch`/`dns.lookup` resolves hostnames via libuv's threadpool (default size 4), and the
+  down peer's two slow lookups (health+status) tied up threads long enough to delay the
+  concurrently-issued, otherwise-fast lookups for the healthy peers past their own 1500ms
+  budget too — a shared-resource starvation across independent requests, not a bug in the
+  per-peer timeout/error-handling logic itself.
+- Decision: set `UV_THREADPOOL_SIZE: "16"` on the `gateway` service's environment in
+  `docker-compose.prod.yml`. Re-verified live by stopping the leader a second time: the
+  dashboard correctly showed the down peer as unhealthy while the two healthy peers reported
+  accurate state.
+- Why: the standard, minimal, well-documented mitigation for libuv threadpool starvation from
+  slow DNS/getaddrinfo calls (a known Node-on-Alpine/musl class of issue) — one env var, no
+  application code change, no behavior change for the already-correct per-request
+  timeout/error-isolation logic in `clusterStatus.ts`.
+- Alternatives considered: lowering `STATUS_TIMEOUT_MS` (wrong direction — the healthy peers'
+  requests were already fast; the problem was never getting a thread in time to run, not a
+  slow response once running); switching to a DNS-caching resolver or pre-resolving peer IPs
+  (heavier change, not needed once the threadpool bottleneck is removed); ignoring it as
+  cosmetic (rejected — a dashboard that reports the whole cluster down during a single-node
+  outage is actively misleading in exactly the demo scenario the dashboard exists for).
+- Tradeoffs / risks: slightly higher memory/thread overhead on the 2GB VM from more OS threads
+  (negligible at this scale — the gateway is I/O-bound, not CPU-bound). This is a
+  container-runtime tuning knob discovered under real infrastructure, not something the local
+  Docker Desktop dev loop or the L7a local-verify gate exercised (the local gate never stopped
+  a peer's *container* the way the live L7b failover gate did) — worth carrying into the dev
+  compose file too if this recurs there, not done here since out of L7b's scope.
+- Supersedes: none.
+
+---
+
 ### D20 — L7b image delivery: build+push locally to Artifact Registry; public entry: Cloudflare quick tunnel
 - Date: 2026-07-20
 - Context: D19 picked `e2-small` (2 vCPU/2GB) for L7b. `docker-compose.prod.yml` as written

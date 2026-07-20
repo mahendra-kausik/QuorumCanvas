@@ -3,6 +3,51 @@
 > Read this FIRST at the start of every session. Update at the end of every layer.
 
 ## Last done
+- **2026-07-20 — Layer 7b (live GCP bring-up) COMPLETE.** L7 gate passed against the real
+  deployed cluster (evidence below). D20 covers the two execution decisions made along the way.
+  - **Live topology**: GCP project `mini-raft-prod`, VM `mini-raft` (`e2-small`, asia-south1-a,
+    Ubuntu 22.04, billed to the free trial). Images built locally (Docker Desktop) and pushed to
+    Artifact Registry (`asia-south1-docker.pkg.dev/mini-raft-prod/mini-raft/{replica,gateway}`)
+    — the VM only `docker compose pull`s, never builds, avoiding `npm ci`+`tsc` on the 2GB
+    shape (D20). Public entry: Cloudflare **quick tunnel** (`cloudflared-quick`, no account/
+    domain) — ephemeral `*.trycloudflare.com` hostname (D20). Frontend on Vercel
+    (`https://mini-raft-six.vercel.app`, stable alias), env vars point at the current tunnel URL.
+  - **Bug found + fixed during the live gate, not by static review**: `GET /cluster-status`
+    reported *every* peer (including healthy ones) as `"This operation was aborted"` whenever
+    one peer was actually down. Root cause: the base image's musl libc resolves a *stopped*
+    peer's Docker DNS name slowly (~5s NXDOMAIN retry, confirmed via `wget` inside the
+    container), starving Node's default 4-thread libuv pool and delaying the concurrent,
+    independent DNS lookups `clusterStatus.ts` fires for the still-healthy peers past their own
+    1500ms budget too. Fixed by setting `UV_THREADPOOL_SIZE=16` on the gateway service in
+    `docker-compose.prod.yml`; re-tested live (stopped the actual leader again) — the dashboard
+    then correctly reported the down peer as unhealthy while the two healthy peers reported
+    accurately. Not a Raft-core bug: `replica2`/`replica3`'s own `/status` showed the internal
+    election/commit continuing correctly throughout, even before the gateway fix — this was a
+    gateway status-aggregation defect only.
+  - **L7 gate evidence (live, against the deployed VM)**:
+    - **Public write**: real WebSocket client (join → stroke, same protocol the frontend uses)
+      through `wss://<tunnel>/ws` → `commitIndex` 0→1 on all 3 replicas.
+    - **Remote failover, twice**: `docker compose stop` on the leader container (`replica1`,
+      then later `replica2`) → a follower won election each time (term 2→3, then 3→4) and kept
+      committing through the public tunnel with no client-side change — `commitIndex` 1→2→3.
+      Second round also validated the `UV_THREADPOOL_SIZE` fix live.
+    - **Reboot survival**: `gcloud compute instances reset` (hard power-cycle, not a graceful
+      `sudo reboot` — the stronger test, since it proves durability came from L1's per-RPC
+      fsync, not a shutdown flush). VM `uptime` confirmed `0 min`; all 5 containers restarted
+      automatically (`restart: unless-stopped`); all 3 replicas reloaded `commitIndex=3` (not
+      reset to 0) and re-elected (term 4→5). The quick tunnel got a **new** ephemeral hostname
+      on restart as expected/documented (D20's known ceiling of the token-free path) — re-fetched
+      it from `cloudflared-quick` logs, updated the VM's `.env`/Vercel env vars, redeployed.
+      Final end-to-end write through the new URL → `commitIndex=4`, `join_ack` showed all 4
+      prior strokes preserved (**RESULT: PASS**).
+  - **Also fixed along the way**: `docker compose` interpolates every service's env regardless
+    of `--profile`, so the compose-level `TUNNEL_TOKEN:?required` guard on the named-tunnel
+    service also blocked the token-free `quicktunnel` profile — relaxed to `TUNNEL_TOKEN:-`
+    (the named-tunnel service still fails clearly at container startup if actually used without
+    one).
+  - **Live URLs at time of writing** (ephemeral tunnel — will change on any `cloudflared-quick`
+    restart): frontend `https://mini-raft-six.vercel.app`, gateway
+    `https://pens-coastal-poem-envelope.trycloudflare.com`.
 - **2026-07-20 — D19: L7b cloud target switched from Oracle Always Free to GCP `e2-small`
   (asia-south1) on the $300/90-day free trial.** Oracle login/signup was blocked with no ETA;
   re-examined the actual requirement (season-length public demo for placement interviews, not
@@ -282,11 +327,12 @@
   commit rule already correct — DECISIONS D02, interview assets).
 
 ## Next up
-- **Layer 7b — live GCP bring-up** (user-driven, per `DEPLOY.md`; I troubleshoot): provision the
-  `e2-small` VM (asia-south1, free trial), stand up the Cloudflare Tunnel, deploy the frontend
-  to Vercel, then verify the real L7 gate (public URL, remote failover, reboot survival) against
-  the live cluster. Once that's confirmed, **Layer 8 — Proof & benchmarks** is next per
-  `PROJECT_PLAN.md`.
+- **Layer 8 — Proof & benchmarks** (per `PROJECT_PLAN.md`), now that L7b's live gate has
+  passed. Benchmark harness work can start against the local dev cluster; headline numbers
+  should ultimately come from the deployed GCP cluster for interview defensibility.
+- **Reminder**: the GCP VM is running against the **90-day free trial** (see D19) — delete the
+  instance (`gcloud compute instances delete mini-raft --project=mini-raft-prod
+  --zone=asia-south1-a`) once done demoing/benchmarking to stop credit burn, per `DEPLOY.md`.
 
 ## Prioritized defect backlog (from the audit)
 1. ~~**[CRITICAL]** No durable persistence — restart → term 0 / votedFor null → double-vote →
