@@ -78,4 +78,18 @@ describe('validateStroke', () => {
   it('rejects an invalid action', () => {
     expect(validateStroke({ ...makeStroke(), action: 'delete_everything' }, conn).ok).toBe(false);
   });
+
+  it('accepts an undo_stroke event despite width:0 and empty points', () => {
+    const undoEvent = makeStroke({ action: 'undo_stroke', targetStrokeId: 'stroke-1', width: 0, points: [] });
+    expect(validateStroke(undoEvent, conn)).toEqual({ ok: true });
+  });
+
+  it('accepts a redo_stroke event despite width:0 and empty points', () => {
+    const redoEvent = makeStroke({ action: 'redo_stroke', targetStrokeId: 'stroke-1', width: 0, points: [] });
+    expect(validateStroke(redoEvent, conn)).toEqual({ ok: true });
+  });
+
+  it('rejects an undo_stroke/redo_stroke event missing targetStrokeId', () => {
+    expect(validateStroke(makeStroke({ action: 'undo_stroke', width: 0, points: [] }), conn).ok).toBe(false);
+  });
 });

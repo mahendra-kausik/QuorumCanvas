@@ -29,9 +29,31 @@ export function validateStroke(
   if (s.boardId !== conn.boardId || s.userId !== conn.userId) {
     return { ok: false, reason: 'Stroke boardId/userId must match connection' };
   }
+  if (s.action !== undefined && !STROKE_ACTIONS.has(s.action as string)) {
+    return { ok: false, reason: 'Invalid stroke action' };
+  }
+  if (s.targetStrokeId !== undefined && typeof s.targetStrokeId !== 'string') {
+    return { ok: false, reason: 'Invalid targetStrokeId' };
+  }
+  const action = s.action ?? 'stroke';
+  const isUndoRedo = action === 'undo_stroke' || action === 'redo_stroke';
+  if (isUndoRedo && typeof s.targetStrokeId !== 'string') {
+    return { ok: false, reason: 'undo_stroke/redo_stroke requires targetStrokeId' };
+  }
+
   if (typeof s.color !== 'string' || !HEX_COLOR.test(s.color)) {
     return { ok: false, reason: 'Invalid stroke color' };
   }
+  if (typeof s.timestamp !== 'number' || !Number.isFinite(s.timestamp)) {
+    return { ok: false, reason: 'Invalid stroke timestamp' };
+  }
+
+  // undo_stroke/redo_stroke carry no drawing data (width 0, points []) — they're pointers to
+  // a prior stroke's id, not strokes themselves, so the shape checks below don't apply.
+  if (isUndoRedo) {
+    return { ok: true };
+  }
+
   if (typeof s.width !== 'number' || !Number.isFinite(s.width) || s.width <= 0 || s.width > 100) {
     return { ok: false, reason: 'Invalid stroke width' };
   }
@@ -42,15 +64,6 @@ export function validateStroke(
     if (!Array.isArray(point) || point.length !== 2 || !point.every((n) => typeof n === 'number' && Number.isFinite(n))) {
       return { ok: false, reason: 'Invalid stroke point' };
     }
-  }
-  if (typeof s.timestamp !== 'number' || !Number.isFinite(s.timestamp)) {
-    return { ok: false, reason: 'Invalid stroke timestamp' };
-  }
-  if (s.action !== undefined && !STROKE_ACTIONS.has(s.action as string)) {
-    return { ok: false, reason: 'Invalid stroke action' };
-  }
-  if (s.targetStrokeId !== undefined && typeof s.targetStrokeId !== 'string') {
-    return { ok: false, reason: 'Invalid targetStrokeId' };
   }
 
   return { ok: true };

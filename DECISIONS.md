@@ -18,6 +18,37 @@
 
 ---
 
+### D27 — Bug: undo/redo strokes silently rejected by gateway validation, never broadcast to other clients
+- Date: 2026-07-21
+- Context: on the live deployment, undoing a stroke only removed it on the undoer's own screen —
+  other connected clients kept seeing it. Traced the write path frontend → gateway
+  `validateStroke` → Raft: `useBoard.ts`'s `undoLastStroke`/`redoLastStroke` build an
+  `undo_stroke`/`redo_stroke` event with `width: 0, points: []` (they're pointers to a prior
+  stroke's id, not real strokes) and apply it optimistically to local state immediately. But
+  `gateway/src/security.ts`'s `validateStroke` unconditionally required `width > 0` and
+  `points.length > 0` for every stroke shape, including undo/redo ones — so the gateway silently
+  rejected every undo/redo message before it ever reached `raftClient.submitStroke`. Worse, that
+  rejection path (`messageHandler.ts`'s `{ type: 'error', message: validation.reason }`) omits the
+  `code`/`strokeId` fields the frontend's rollback check needs (`message.code ===
+  'RAFT_WRITE_FAILED'`), so the optimistic local removal was never rolled back either — it just
+  looked successful locally while never committing or broadcasting.
+- Decision: `validateStroke` now branches on `action`: `undo_stroke`/`redo_stroke` skip the
+  width/points/point-shape checks entirely (still validated: id, boardId/userId binding, action
+  enum, `targetStrokeId` presence/type, color, timestamp), since they carry no drawing data by
+  design.
+- Why: the validation function was written for the single "drawn stroke" shape and never updated
+  when undo/redo were added as a second event shape sharing the same wire type — a whole-repo grep
+  found no existing test exercising `validateStroke` with an undo/redo payload, which is why it
+  shipped broken.
+- Alternatives considered: give undo/redo events a non-zero placeholder width and a dummy point
+  (rejected — encodes a lie into the data model to satisfy a shape check that shouldn't apply);
+  add the `code`/`strokeId` fields to the validation-rejection error too (also done, in principle,
+  by fixing the root cause instead — a correctly-validated undo no longer needs the rollback path
+  to fire).
+- Tradeoffs / risks: none identified; test added
+  (`tests/gateway/security.test.ts`: accepts undo/redo despite width 0/empty points, rejects
+  undo/redo missing `targetStrokeId`) so a regression here fails CI immediately.
+
 ### D26 — `DEFENSE.md` as a separate file, every answer anchored to `file:line`
 - Date: 2026-07-21
 - Context: L9 needs the §8 interview questions answered "grounded in code." Two options: a
