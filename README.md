@@ -9,11 +9,6 @@ Not a toy: it's crash-durable (WAL + snapshots, fsynced before every dependent R
 serves correct reads (ReadIndex), is observable (Prometheus `/metrics`), auth-gated, benchmarked,
 and runs at a public URL on free-tier cloud.
 
-- **Design defense** — the hard Raft questions answered from code: [`DEFENSE.md`](DEFENSE.md)
-- **Every non-trivial decision, with rationale**: [`DECISIONS.md`](DECISIONS.md)
-- **Deep protocol notes**: [`Documentation.md`](Documentation.md)
-- **Build plan + acceptance gates**: [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
-
 ---
 
 ## Architecture
@@ -61,7 +56,7 @@ in [`benchmarks/results/`](benchmarks/results/).
 Workload: `writes=500 concurrency=16`, single client process (not a hardware ceiling). GCP shape:
 `e2-small` (2 vCPU Xeon @2.2GHz, 1.9 GB RAM), Node 20. Failover time is dominated by the 500–800 ms
 election-timeout window plus the harness's own 500 ms polling granularity, not raw RPC cost.
-Local numbers reproduce across back-to-back runs (the L8 gate requirement).
+Local numbers reproduce across back-to-back runs.
 
 > **Résumé line:** *Built a crash-durable Raft cluster in TypeScript (WAL + snapshots) backing a
 > real-time collaborative canvas: **79 committed writes/s**, **p99 304 ms** commit latency,
@@ -71,8 +66,6 @@ Local numbers reproduce across back-to-back runs (the L8 gate requirement).
 
 ## Raft properties implemented (and where they live)
 
-Full walkthrough with `file:line` citations in [`DEFENSE.md`](DEFENSE.md). In brief:
-
 - **Leader election** with randomized timeouts (500–800 ms) + split-vote retry
 - **Crash-durable state** — `currentTerm`/`votedFor`/log fsynced *before* any dependent RPC reply
 - **Majority commit** with the **current-term commit rule** (Figure-8 safety, §5.4.2)
@@ -81,7 +74,8 @@ Full walkthrough with `file:line` citations in [`DEFENSE.md`](DEFENSE.md). In br
 - **Correct reads** via ReadIndex (no stale reads on a partitioned leader)
 - **Backpressure** — AppendEntries batch cap + a single coalesced replication driver per peer
 
-Each ships with a test that fails if the property breaks (see the map at the bottom of `DEFENSE.md`).
+Each ships with a test that fails if the property breaks — see `tests/replica/`
+(`crashRecovery.test.ts`, `readIndex.test.ts`, `snapshot.test.ts`, `backpressure.test.ts`).
 
 ---
 
@@ -134,14 +128,13 @@ the ephemeral-URL caveat below); treat an unreachable board as expected, not a b
 
 The cluster runs at a public URL on free-tier cloud (currently GCP `e2-small` on the 90-day free
 trial; Oracle Always Free is the documented alternative). Public HTTPS/WSS entry is via a
-Cloudflare Tunnel; the frontend is on Vercel. **Full runbook, step by step:**
-[`DEPLOY.md`](DEPLOY.md) — provision the VM, build/push images, create the tunnel, fill `.env`,
-`scripts/deploy-up.sh`, deploy the frontend, then verify the live gate (public write, remote
-failover, reboot survival).
+Cloudflare Tunnel; the frontend is on Vercel. On the VM: copy `.env.example` to `.env` and fill
+it in, then `scripts/deploy-up.sh [tunnel|quicktunnel]` pulls the prebuilt images and starts the
+cluster, gateway and tunnel from `docker-compose.prod.yml`.
 
 > The deployment uses a token-free Cloudflare **quick tunnel**, whose `*.trycloudflare.com`
-> hostname changes on restart — so no live URL is hardcoded here; get the current one from the
-> VM as described in `DEPLOY.md`.
+> hostname changes on restart — so no live URL is hardcoded here; the current one is printed in
+> the `cloudflared-quick` container's logs on the VM.
 
 ---
 
@@ -184,16 +177,16 @@ bash scripts/test-network-partition.sh
   proves the consensus protocol, not geo-distributed fault tolerance. A real deployment would
   spread replicas across failure domains.
 - **Hand-rolled, not battle-tested.** Written to *demonstrate* each safety property from readable
-  code (that's the point — see `DEFENSE.md`), not to compete with etcd/raft at scale.
+  code (that's the point), not to compete with etcd/raft at scale.
 - **No dynamic membership.** Joint-consensus reconfiguration, multi-Raft sharding, and
-  geo-replication are acknowledged next steps, not implemented (`PROJECT_PLAN.md` §9).
+  geo-replication are acknowledged next steps, not implemented.
 - **No inter-replica TLS.** RPC between replicas is plaintext on a trusted network; auth is
   enforced at the gateway edge only. The gateway `AUTH_TOKEN` is coarse admission control (baked
   into the public bundle), not a per-user secret — there is no account model.
 - **Ephemeral public URL.** The token-free Cloudflare quick tunnel gets a new hostname on restart
-  (a deliberate free-tier choice; a named tunnel with a domain removes this — see `DECISIONS.md`).
+  (a deliberate free-tier choice; a named tunnel with a domain removes this).
 - **Read freshness bound.** A freshly-elected leader's `commitIndex` can briefly lag until its
-  first current-term commit — never wrong data, self-healing (`DECISIONS.md` D13).
+  first current-term commit — never wrong data, self-healing.
 
 ## Prerequisites
 

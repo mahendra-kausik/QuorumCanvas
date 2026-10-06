@@ -12,3 +12,14 @@ logs
 replica1/
 replica2/
 replica3/
+
+# Local-only working docs (build governance, deploy runbook, interview prep) — not published.
+/CLAUDE.md
+/DECISIONS.md
+/PROGRESS.md
+/DEPLOY.md
+/PROJECT_PLAN.md
+/DEFENSE.md
+/INTERVIEW_PREP.md
+/STUDY-GUIDE.md
+/*-ProjectInfo.md
