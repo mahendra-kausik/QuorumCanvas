@@ -122,9 +122,8 @@ npm run dev
 
 ## Deployment
 
-**Live demo (may be offline):** https://mini-raft-six.vercel.app — the frontend URL is stable,
-but the demo only works while the backend VM is up and Vercel points at its current tunnel (see
-the ephemeral-URL caveat below); treat an unreachable board as expected, not a bug.
+**Live demo: offline.** The backend ran on a GCP free-trial VM that has been shut down, so the
+hosted board no longer works. The deployment steps below reproduce it on any Docker host.
 
 The cluster runs at a public URL on free-tier cloud (currently GCP `e2-small` on the 90-day free
 trial; Oracle Always Free is the documented alternative). Public HTTPS/WSS entry is via a
